@@ -41,6 +41,8 @@ behaviour itself rather than on a higher-level UI framework.
 <<imports>>=
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 import pty
 import select
@@ -128,6 +130,109 @@ def test_build_shell_environment_sets_prompt():
 @
 
 
+\section{Claiming the PTY as a controlling terminal}
+
+Attaching bash to the slave side of a PTY is not quite enough for a real
+interactive shell.  Bash also expects that terminal to be its controlling
+terminal, otherwise it disables job control and prints warnings before the
+prompt appears.
+
+Python 3.10 does not yet offer [[os.login_tty()]], so the smallest fix is
+to do the setup just before [[exec]] in the child process.  We start a new
+session and claim file descriptor [[0]], which already points at the PTY
+slave by then.
+
+<<functions>>=
+def prepare_child_terminal() -> None:
+    """Turn the PTY slave on fd ``0`` into the controlling terminal."""
+
+    os.setsid()
+    if hasattr(termios, "TIOCSCTTY"):
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+@
+
+
+\section{Launching bash on a configured PTY}
+
+The scripted and interactive shells must start bash in exactly the same PTY
+configuration.  A shared helper keeps the controlling-terminal fix in one
+place and ensures both paths see the same prompt and shell options.
+
+<<functions>>=
+def spawn_shell_process(
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    env: dict[str, str] | None = None,
+) -> tuple[int, subprocess.Popen]:
+    """Start bash on a PTY and return the master fd and child process."""
+
+    workspace_path = Path(workspace)
+    master_fd, slave_fd = pty.openpty()
+    try:
+        process = subprocess.Popen(
+            [shell, "--noprofile", "--norc", "-i"],
+            cwd=workspace_path,
+            env=build_shell_environment(env),
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            preexec_fn=prepare_child_terminal,
+            close_fds=True,
+        )
+    except Exception:
+        os.close(master_fd)
+        os.close(slave_fd)
+        raise
+
+    os.close(slave_fd)
+    return master_fd, process
+@
+
+
+\section{Treating PTY EOF consistently}
+
+Pseudo-terminals signal end-of-file differently from ordinary files.  Some
+systems return an empty byte string, while Linux often raises [[EIO]] once
+the slave side disappears.  Treating both cases as EOF keeps the relay and
+drain loops from spinning forever after the shell exits.
+
+<<functions>>=
+def read_pty_output(master_fd: int) -> bytes | None:
+    """Read one PTY chunk, or return ``None`` at end-of-file."""
+
+    try:
+        data = os.read(master_fd, 4096)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            return None
+        raise
+
+    if not data:
+        return None
+    return data
+@
+
+Let's verify that both common PTY EOF signals are normalised to
+[[None]].
+
+<<test functions>>=
+def test_read_pty_output_treats_eio_as_eof(monkeypatch):
+    def raise_eio(master_fd, size):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "read", raise_eio)
+
+    assert read_pty_output(3) is None
+
+
+def test_read_pty_output_treats_empty_read_as_eof(monkeypatch):
+    monkeypatch.setattr(os, "read", lambda master_fd, size: b"")
+
+    assert read_pty_output(3) is None
+@
+
+
 \section{Reading all output from a PTY}
 
 Both the scripted and interactive variants need the same drain logic:
@@ -136,22 +241,26 @@ available.
 
 <<functions>>=
 def read_transcript(master_fd: int, process: subprocess.Popen) -> str:
-    """Drain PTY output until ``process`` exits."""
+    """Drain PTY output until ``process`` exits and the PTY closes."""
 
     chunks = bytearray()
+    master_open = True
     while True:
-        readable, _, _ = select.select([master_fd], [], [], 0.05)
-        if master_fd in readable:
-            try:
-                data = os.read(master_fd, 4096)
-            except OSError:
-                data = b""
-
-            if data:
+        readable, _, _ = select.select(
+            [master_fd] if master_open else [],
+            [],
+            [],
+            0.05,
+        )
+        if master_open and master_fd in readable:
+            data = read_pty_output(master_fd)
+            if data is None:
+                master_open = False
+            else:
                 chunks.extend(data)
                 continue
 
-        if process.poll() is not None:
+        if process.poll() is not None and not master_open:
             break
 
     return chunks.decode("utf-8", errors="replace")
@@ -175,18 +284,11 @@ def run_scripted_shell(
     """Run ``commands`` in a PTY-backed shell and capture the transcript."""
 
     started_at = utc_now()
-    workspace_path = Path(workspace)
-    master_fd, slave_fd = pty.openpty()
-    process = subprocess.Popen(
-        [shell, "--noprofile", "--norc", "-i"],
-        cwd=workspace_path,
-        env=build_shell_environment(env),
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True,
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        env=env,
     )
-    os.close(slave_fd)
 
     command_text = commands
     if not command_text.endswith("\n"):
@@ -226,6 +328,16 @@ def test_run_scripted_shell_uses_workspace(tmp_path):
     )
 
     assert (tmp_path / "notes.txt").read_text() == "tutorial\n"
+
+
+def test_run_scripted_shell_avoids_job_control_warnings(tmp_path):
+    result = run_scripted_shell(
+        "pwd",
+        workspace=tmp_path,
+    )
+
+    assert "cannot set terminal process group" not in result.transcript
+    assert "no job control in this shell" not in result.transcript
 @
 
 
@@ -234,6 +346,80 @@ def test_run_scripted_shell_uses_workspace(tmp_path):
 The interactive variant forwards bytes between the PTY and the user's
 terminal.  We temporarily switch stdin to raw mode so control characters
 and line editing behave as they do in a normal shell session.
+
+The relay loop must also notice when the PTY itself has closed.  Relying on
+an empty [[select()]] result is not enough because a closed PTY often stays
+readable at EOF.
+
+<<functions>>=
+def relay_interactive_shell(
+    master_fd: int,
+    process: subprocess.Popen,
+    stdin_fd: int,
+    stdout_fd: int,
+) -> str:
+    """Relay data between the user's terminal and a PTY-backed shell."""
+
+    transcript = bytearray()
+    master_open = True
+    while True:
+        readable, _, _ = select.select(
+            [stdin_fd] + ([master_fd] if master_open else []),
+            [],
+            [],
+            0.05,
+        )
+
+        if master_open and master_fd in readable:
+            data = read_pty_output(master_fd)
+            if data is None:
+                master_open = False
+            else:
+                transcript.extend(data)
+                os.write(stdout_fd, data)
+
+        if stdin_fd in readable:
+            data = os.read(stdin_fd, 4096)
+            if data and master_open:
+                os.write(master_fd, data)
+
+        if process.poll() is not None and not master_open:
+            break
+
+    return transcript.decode("utf-8", errors="replace")
+@
+
+Let's also verify the relay exits as soon as the child is gone and the PTY
+reports EOF.  That is the failure mode that previously left the tutorial
+hanging after [[exit]].
+
+<<test functions>>=
+def test_relay_interactive_shell_stops_after_process_exit_and_pty_eof(
+    monkeypatch,
+):
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+    calls = {"select": 0}
+
+    def fake_select(read_fds, write_fds, error_fds, timeout):
+        calls["select"] += 1
+        if calls["select"] > 1:
+            raise AssertionError("relay loop did not stop after PTY EOF")
+        return ([11], [], [])
+
+    monkeypatch.setattr(select, "select", fake_select)
+    monkeypatch.setattr(
+        "tutorial.shell.read_pty_output",
+        lambda master_fd: None,
+    )
+
+    transcript = relay_interactive_shell(11, FinishedProcess(), 12, 13)
+
+    assert transcript == ""
+    assert calls["select"] == 1
+@
 
 <<functions>>=
 def run_interactive_shell(
@@ -248,46 +434,24 @@ def run_interactive_shell(
         raise RuntimeError("Interactive tutorial shells require a TTY.")
 
     started_at = utc_now()
-    workspace_path = Path(workspace)
-    master_fd, slave_fd = pty.openpty()
-    process = subprocess.Popen(
-        [shell, "--noprofile", "--norc", "-i"],
-        cwd=workspace_path,
-        env=build_shell_environment(env),
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True,
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        env=env,
     )
-    os.close(slave_fd)
 
-    transcript = bytearray()
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
     original_mode = termios.tcgetattr(stdin_fd)
 
     try:
         tty.setraw(stdin_fd)
-        while True:
-            readable, _, _ = select.select([master_fd, stdin_fd], [], [], 0.05)
-
-            if master_fd in readable:
-                try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
-                    data = b""
-
-                if data:
-                    transcript.extend(data)
-                    os.write(stdout_fd, data)
-
-            if stdin_fd in readable:
-                data = os.read(stdin_fd, 4096)
-                if data:
-                    os.write(master_fd, data)
-
-            if process.poll() is not None and not readable:
-                break
+        transcript = relay_interactive_shell(
+            master_fd,
+            process,
+            stdin_fd,
+            stdout_fd,
+        )
     finally:
         termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
 
@@ -298,6 +462,6 @@ def run_interactive_shell(
         started_at=started_at,
         ended_at=ended_at,
         exit_status=exit_status,
-        transcript=transcript.decode("utf-8", errors="replace"),
+        transcript=transcript,
     )
 @
