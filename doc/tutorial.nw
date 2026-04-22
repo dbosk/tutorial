@@ -28,6 +28,7 @@
 \mainmatter
 
 \input{../src/tutorial/tutorial.tex}
+\input{../src/tutorial/catalog.tex}
 \input{../src/tutorial/model.tex}
 \input{../src/tutorial/state.tex}
 \input{../src/tutorial/shell.tex}

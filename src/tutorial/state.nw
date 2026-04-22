@@ -304,36 +304,52 @@ Starting a run allocates a fresh workspace immediately.  That matters for
 the CLI because the user should know exactly where the step shell will be
 started before the shell opens.
 
+We also copy the tutorial title and source metadata into the run record.
+That way review still has something human-readable to show even if the
+original Markdown file disappears later.
+
 <<state store methods>>=
-def start_run(self, tutorial_id: str) -> TutorialRun:
-    """Create and persist a fresh run for ``tutorial_id``."""
+def start_run(self, tutorial: Tutorial) -> TutorialRun:
+    """Create and persist a fresh run for ``tutorial``."""
 
     created_at = utc_now()
     run_id = build_run_id()
-    workspace = self.workspace_path(tutorial_id, run_id)
+    workspace = self.workspace_path(tutorial.id, run_id)
     workspace.mkdir(parents=True, exist_ok=True)
     run = TutorialRun(
-        tutorial_id=tutorial_id,
+        tutorial_id=tutorial.id,
+        tutorial_title=tutorial.title,
         run_id=run_id,
         workspace=str(workspace),
         started_at=created_at,
         updated_at=created_at,
+        tutorial_source_path=tutorial.source_path,
+        tutorial_source_digest=tutorial.source_digest,
     )
 
-    runs = self.load_runs(tutorial_id)
+    runs = self.load_runs(tutorial.id)
     runs.append(run)
-    self.save_runs(tutorial_id, runs)
+    self.save_runs(tutorial.id, runs)
     return run
 @
 
 <<test functions>>=
 def test_start_run_creates_workspace_and_persists_run(tmp_path):
     store = StateStore(tmp_path)
+    tutorial = Tutorial(
+        id="shell-basics",
+        title="Shell Basics",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+        source_path="/tmp/shell-basics.md",
+        source_digest="digest",
+    )
 
-    run = store.start_run("shell-basics")
+    run = store.start_run(tutorial)
 
     assert Path(run.workspace).is_dir()
     assert store.latest_run("shell-basics").run_id == run.run_id
+    assert store.latest_run("shell-basics").tutorial_title == "Shell Basics"
 @
 
 
@@ -360,7 +376,13 @@ def store_run(self, run: TutorialRun) -> None:
 <<test functions>>=
 def test_store_run_replaces_existing_record(tmp_path):
     store = StateStore(tmp_path)
-    run = store.start_run("shell-basics")
+    tutorial = Tutorial(
+        id="shell-basics",
+        title="Shell Basics",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+    )
+    run = store.start_run(tutorial)
     run.transcripts.append(
         StepTranscript(
             tutorial_id="shell-basics",

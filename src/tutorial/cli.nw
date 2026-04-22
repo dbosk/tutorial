@@ -30,11 +30,15 @@ app = create_app()
 import argparse
 from io import StringIO
 
+import pytest
+
+from tutorial.catalog import TutorialCatalog
 from rich.console import Console
 from typer.testing import CliRunner
 
 from tutorial.cli import *
 from tutorial.model import StepTranscript
+from tutorial.run import write_demo_tutorial
 from tutorial.shell import run_scripted_shell
 from tutorial.state import StateStore
 
@@ -55,6 +59,7 @@ from pathlib import Path
 from typing import Annotated
 from typing import Callable
 
+from tutorial.catalog import TutorialCatalog
 from rich.console import Console
 from rich.markdown import Markdown
 import typer
@@ -78,13 +83,17 @@ def build_runner(
     *,
     namespace: str = "tutorial",
     state_root: str | Path | None = None,
+    tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    allow_shell_checks: bool = False,
 ) -> TutorialRunner:
     """Build a tutorial runner for one CLI host namespace."""
 
     return TutorialRunner(
         StateStore(state_root, namespace=namespace),
+        TutorialCatalog(tutorial_paths),
         shell_runner=shell_runner,
+        allow_shell_checks=allow_shell_checks,
     )
 @
 
@@ -93,6 +102,48 @@ def test_build_runner_uses_requested_namespace(tmp_path):
     runner = build_runner(namespace="host-app", state_root=tmp_path)
 
     assert runner.store.namespace == "host-app"
+    assert runner.catalog.get_tutorials() == ()
+@
+
+
+\section{Combining configured and command-line tutorial paths}
+
+Embedded hosts may configure tutorial paths up front, while the standalone
+CLI should also accept them on the command line.  The effective path set
+is simply the configured tuple followed by any extra command-line paths.
+
+<<functions>>=
+def effective_tutorial_paths(
+    configured_paths: tuple[str | Path, ...],
+    command_paths: tuple[str | Path, ...],
+) -> tuple[str | Path, ...]:
+    """Return the combined tutorial paths for one command invocation."""
+
+    return tuple(configured_paths) + tuple(command_paths)
+@
+
+<<functions>>=
+def require_tutorial_paths(
+    tutorial_paths: tuple[str | Path, ...],
+) -> tuple[str | Path, ...]:
+    """Require an explicit tutorial path for commands that load tutorials."""
+
+    if tutorial_paths:
+        return tutorial_paths
+    raise RuntimeError("No tutorial paths configured. Pass --tutorial-path.")
+@
+
+<<test functions>>=
+def test_effective_tutorial_paths_keeps_configured_and_command_paths():
+    combined = effective_tutorial_paths((Path("/tmp/one"),), (Path("/tmp/two"),))
+
+    assert combined == (Path("/tmp/one"), Path("/tmp/two"))
+@
+
+<<test functions>>=
+def test_require_tutorial_paths_rejects_empty_configuration():
+    with pytest.raises(RuntimeError, match="tutorial-path"):
+        require_tutorial_paths(())
 @
 
 
@@ -506,8 +557,13 @@ def test_handle_blocked_step_can_reread_and_show_hint(tmp_path):
         force_terminal=False,
         color_system=None,
     )
-    tutorial = build_runner(state_root=tmp_path).list_tutorials()[0][0]
-    run = StateStore(tmp_path).start_run(tutorial.id)
+    tutorial_path = write_demo_tutorial(tmp_path)
+    runner = build_runner(
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+    )
+    tutorial = runner.list_tutorials()[0][0]
+    run = runner.store.start_run(tutorial)
     answers = iter(["read again", "hint", "try again"])
     result = RunResult(
         tutorial=tutorial,
@@ -587,6 +643,7 @@ def run_tutorial_with_menu(
 
 <<test functions>>=
 def test_run_tutorial_with_menu_retries_until_success(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
     commands = iter(
         [
             "pwd\n",
@@ -600,8 +657,10 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
         return run_scripted_shell(next(commands), workspace=workspace)
 
     tutorial_runner = build_runner(
-        state_root=tmp_path,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
         shell_runner=scripted_runner,
+        allow_shell_checks=True,
     )
     buffer = StringIO()
     console = Console(
@@ -626,14 +685,17 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
 
 
 def test_run_tutorial_with_menu_can_exit_after_failed_step(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
     commands = iter(["pwd\n"])
 
     def scripted_runner(*, workspace):
         return run_scripted_shell(next(commands), workspace=workspace)
 
     tutorial_runner = build_runner(
-        state_root=tmp_path,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
         shell_runner=scripted_runner,
+        allow_shell_checks=True,
     )
     console = Console(file=StringIO(), force_terminal=False, color_system=None)
 
@@ -662,24 +724,56 @@ def create_app(
     *,
     namespace: str = "tutorial",
     state_root: str | Path | None = None,
+    tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Create a Typer application for tutorials."""
 
     application = typer.Typer(help="Run interactive command-line tutorials.")
 
-    def runner() -> TutorialRunner:
+    def runner(
+        *,
+        command_tutorial_paths: tuple[str | Path, ...] = (),
+        command_allow_shell_checks: bool = False,
+        require_paths: bool = False,
+    ) -> TutorialRunner:
+        paths = effective_tutorial_paths(tutorial_paths, command_tutorial_paths)
+        if require_paths:
+            paths = require_tutorial_paths(paths)
         return build_runner(
             namespace=namespace,
             state_root=state_root,
+            tutorial_paths=paths,
             shell_runner=shell_runner,
+            allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
         )
 
     @application.command("list")
-    def list_command() -> None:
-        """List the built-in tutorials and their saved progress."""
+    def list_command(
+        tutorial_path: Annotated[
+            list[Path] | None,
+            typer.Option(
+                "--tutorial-path",
+                help=(
+                    "Path to a tutorial Markdown file or directory. "
+                    "Repeat to add more paths."
+                ),
+            ),
+        ] = None,
+    ) -> None:
+        """List the loaded tutorials and their saved progress."""
 
-        for tutorial, progress in runner().list_tutorials():
+        try:
+            tutorial_runner = runner(
+                command_tutorial_paths=tuple(tutorial_path or ()),
+                require_paths=True,
+            )
+        except (RuntimeError, ValueError) as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+
+        for tutorial, progress in tutorial_runner.list_tutorials():
             typer.echo(
                 format_progress_line(tutorial.id, progress, tutorial.summary)
             )
@@ -687,6 +781,16 @@ def create_app(
     @application.command("run")
     def run_command(
         tutorial_id: str,
+        tutorial_path: Annotated[
+            list[Path] | None,
+            typer.Option(
+                "--tutorial-path",
+                help=(
+                    "Path to a tutorial Markdown file or directory. "
+                    "Repeat to add more paths."
+                ),
+            ),
+        ] = None,
         restart: Annotated[
             bool,
             typer.Option(
@@ -694,10 +798,19 @@ def create_app(
                 help="Start a fresh run instead of resuming saved progress.",
             ),
         ] = False,
+        allow_shell_checks_flag: Annotated[
+            bool,
+            typer.Option(
+                "--allow-shell-checks",
+                help=(
+                    "Trust tutorial-authored shell validation commands for "
+                    "this run."
+                ),
+            ),
+        ] = False,
     ) -> None:
         """Run or resume one tutorial."""
 
-        tutorial_runner = runner()
         console = Console()
 
         def prompt_for_input(prompt: str) -> str:
@@ -715,6 +828,11 @@ def create_app(
             )
 
         try:
+            tutorial_runner = runner(
+                command_tutorial_paths=tuple(tutorial_path or ()),
+                command_allow_shell_checks=allow_shell_checks_flag,
+                require_paths=True,
+            )
             result = run_tutorial_with_menu(
                 tutorial_runner,
                 tutorial_id,
@@ -725,7 +843,7 @@ def create_app(
             )
         except KeyError as error:
             raise typer.BadParameter(str(error), param_hint="tutorial_id")
-        except RuntimeError as error:
+        except (RuntimeError, ValueError) as error:
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1)
 
@@ -755,15 +873,15 @@ def create_app(
     ) -> None:
         """Review saved transcripts for one tutorial."""
 
-        tutorial_runner = runner()
         console = Console()
         try:
+            tutorial_runner = runner()
             tutorial, run, transcripts = tutorial_runner.review(
                 tutorial_id,
                 step_number=step,
                 run_id=run_id,
             )
-        except (KeyError, IndexError) as error:
+        except (KeyError, IndexError, ValueError) as error:
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1)
 
@@ -778,21 +896,28 @@ def create_app(
     return application
 @
 
-Let's verify that the generated application exposes the built-in tutorial
-through the list and review commands.
+Let's verify that the generated application exposes the file-backed
+tutorial commands with explicit tutorial paths for loading and pathless
+review for saved runs.
 
 <<test functions>>=
 def test_list_command_shows_shell_basics(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(create_app(state_root=tmp_path), ["list"])
+    result = runner.invoke(
+        create_app(state_root=tmp_path / "state"),
+        ["list", "--tutorial-path", str(tutorial_path)],
+    )
 
     assert result.exit_code == 0
     assert "shell-basics" in result.stdout
 
 
 def test_review_command_shows_saved_transcript(tmp_path):
-    store = StateStore(tmp_path)
-    run = store.start_run("shell-basics")
+    tutorial_path = write_demo_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+    run = store.start_run(tutorial)
     run.transcripts.append(
         StepTranscript(
             tutorial_id="shell-basics",
@@ -809,7 +934,7 @@ def test_review_command_shows_saved_transcript(tmp_path):
 
     runner = CliRunner()
     result = runner.invoke(
-        create_app(state_root=tmp_path),
+        create_app(state_root=tmp_path / "state"),
         ["review", "shell-basics"],
     )
 
@@ -818,6 +943,7 @@ def test_review_command_shows_saved_transcript(tmp_path):
 
 
 def test_run_command_can_retry_a_failed_step(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
     commands = iter(
         [
             "pwd\n",
@@ -832,8 +958,14 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
 
     runner = CliRunner()
     result = runner.invoke(
-        create_app(state_root=tmp_path, shell_runner=scripted_runner),
-        ["run", "shell-basics"],
+        create_app(state_root=tmp_path / "state", shell_runner=scripted_runner),
+        [
+            "run",
+            "--tutorial-path",
+            str(tutorial_path),
+            "--allow-shell-checks",
+            "shell-basics",
+        ],
         input="try again\n",
     )
 
@@ -876,10 +1008,12 @@ def emit_run_summary(result: RunResult) -> None:
 
 <<test functions>>=
 def test_emit_run_summary_reports_completed_tutorial(capsys, tmp_path):
-    tutorial = build_runner(state_root=tmp_path).list_tutorials()[0][0]
+    tutorial_path = write_demo_tutorial(tmp_path)
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+    run = StateStore(tmp_path / "state").start_run(tutorial)
     result = RunResult(
         tutorial=tutorial,
-        run=StateStore(tmp_path).start_run(tutorial.id),
+        run=run,
         progress=ProgressState(
             tutorial_id=tutorial.id,
             total_steps=3,
@@ -909,14 +1043,18 @@ def add_typer_subcommand(
     name: str = "tutorial",
     namespace: str = "tutorial",
     state_root: str | Path | None = None,
+    tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Attach the tutorial CLI as a Typer subcommand."""
 
     child_app = create_app(
         namespace=namespace,
         state_root=state_root,
+        tutorial_paths=tutorial_paths,
         shell_runner=shell_runner,
+        allow_shell_checks=allow_shell_checks,
     )
     parent_app.add_typer(child_app, name=name)
     return child_app
@@ -924,11 +1062,15 @@ def add_typer_subcommand(
 
 <<test functions>>=
 def test_add_typer_subcommand_registers_tutorial_namespace(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
     parent = typer.Typer()
-    add_typer_subcommand(parent, state_root=tmp_path)
+    add_typer_subcommand(parent, state_root=tmp_path / "state")
 
     runner = CliRunner()
-    result = runner.invoke(parent, ["tutorial", "list"])
+    result = runner.invoke(
+        parent,
+        ["tutorial", "list", "--tutorial-path", str(tutorial_path)],
+    )
 
     assert result.exit_code == 0
     assert "shell-basics" in result.stdout
@@ -948,7 +1090,9 @@ def add_argparse_subcommand(
     name: str = "tutorial",
     namespace: str = "tutorial",
     state_root: str | Path | None = None,
+    tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    allow_shell_checks: bool = False,
 ) -> argparse.ArgumentParser:
     """Attach the tutorial CLI as an argparse subcommand tree."""
 
@@ -957,10 +1101,18 @@ def add_argparse_subcommand(
     tutorial_subparsers.required = True
 
     list_parser = tutorial_subparsers.add_parser("list", help="List tutorials")
+    list_parser.add_argument(
+        "--tutorial-path",
+        action="append",
+        default=[],
+        help="Path to a tutorial Markdown file or directory. Repeat to add more paths.",
+    )
     list_parser.set_defaults(
         tutorial_handler=lambda args: argparse_list_command(
+            args,
             namespace=namespace,
             state_root=state_root,
+            tutorial_paths=tutorial_paths,
             shell_runner=shell_runner,
         )
     )
@@ -977,11 +1129,23 @@ def add_argparse_subcommand(
             args,
             namespace=namespace,
             state_root=state_root,
+            tutorial_paths=tutorial_paths,
             shell_runner=shell_runner,
         )
     )
 
     run_parser = tutorial_subparsers.add_parser("run", help="Run a tutorial")
+    run_parser.add_argument(
+        "--tutorial-path",
+        action="append",
+        default=[],
+        help="Path to a tutorial Markdown file or directory. Repeat to add more paths.",
+    )
+    run_parser.add_argument(
+        "--allow-shell-checks",
+        action="store_true",
+        help="Trust tutorial-authored shell validation commands for this run.",
+    )
     run_parser.add_argument("tutorial_id")
     run_parser.add_argument("--restart", action="store_true")
     run_parser.set_defaults(
@@ -989,7 +1153,9 @@ def add_argparse_subcommand(
             args,
             namespace=namespace,
             state_root=state_root,
+            tutorial_paths=tutorial_paths,
             shell_runner=shell_runner,
+            allow_shell_checks=allow_shell_checks,
         )
     )
     return parser
@@ -997,12 +1163,15 @@ def add_argparse_subcommand(
 
 <<test functions>>=
 def test_add_argparse_subcommand_creates_dispatchable_handler(tmp_path, capsys):
+    tutorial_path = write_demo_tutorial(tmp_path)
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
-    add_argparse_subcommand(subparsers, state_root=tmp_path)
+    add_argparse_subcommand(subparsers, state_root=tmp_path / "state")
 
-    args = parser.parse_args(["tutorial", "list"])
+    args = parser.parse_args(
+        ["tutorial", "list", "--tutorial-path", str(tutorial_path)]
+    )
     exit_code = run_argparse_command(args)
     captured = capsys.readouterr()
 
@@ -1035,18 +1204,30 @@ raising [[typer.Exit]].
 
 <<functions>>=
 def argparse_list_command(
+    args: argparse.Namespace,
     *,
     namespace: str,
     state_root: str | Path | None,
+    tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
 ) -> int:
     """Implement the argparse ``list`` subcommand."""
 
-    runner = build_runner(
-        namespace=namespace,
-        state_root=state_root,
-        shell_runner=shell_runner,
-    )
+    try:
+        runner = build_runner(
+            namespace=namespace,
+            state_root=state_root,
+            tutorial_paths=require_tutorial_paths(
+                effective_tutorial_paths(
+                    tutorial_paths,
+                    tuple(args.tutorial_path),
+                )
+            ),
+            shell_runner=shell_runner,
+        )
+    except (RuntimeError, ValueError) as error:
+        print(error)
+        return 1
     for tutorial, progress in runner.list_tutorials():
         print(format_progress_line(tutorial.id, progress, tutorial.summary))
     return 0
@@ -1058,6 +1239,7 @@ def argparse_review_command(
     *,
     namespace: str,
     state_root: str | Path | None,
+    tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
 ) -> int:
     """Implement the argparse ``review`` subcommand."""
@@ -1065,6 +1247,7 @@ def argparse_review_command(
     runner = build_runner(
         namespace=namespace,
         state_root=state_root,
+        tutorial_paths=tutorial_paths,
         shell_runner=shell_runner,
     )
     console = Console()
@@ -1074,7 +1257,7 @@ def argparse_review_command(
             step_number=args.step,
             run_id=args.run_id,
         )
-    except (KeyError, IndexError) as error:
+    except (KeyError, IndexError, ValueError) as error:
         print(error)
         return 1
 
@@ -1090,8 +1273,10 @@ def argparse_review_command(
 
 <<test functions>>=
 def test_argparse_review_command_shows_saved_transcript(tmp_path, capsys):
-    store = StateStore(tmp_path)
-    run = store.start_run("shell-basics")
+    tutorial_path = write_demo_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+    run = store.start_run(tutorial)
     run.transcripts.append(
         StepTranscript(
             tutorial_id="shell-basics",
@@ -1113,7 +1298,8 @@ def test_argparse_review_command_shows_saved_transcript(tmp_path, capsys):
             run_id=None,
         ),
         namespace="tutorial",
-        state_root=tmp_path,
+        state_root=tmp_path / "state",
+        tutorial_paths=(),
         shell_runner=run_scripted_shell,
     )
     captured = capsys.readouterr()
@@ -1129,32 +1315,41 @@ def argparse_run_command(
     *,
     namespace: str,
     state_root: str | Path | None,
+    tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
+    allow_shell_checks: bool,
 ) -> int:
     """Implement the argparse ``run`` subcommand."""
 
-    tutorial_runner = build_runner(
-        namespace=namespace,
-        state_root=state_root,
-        shell_runner=shell_runner,
-    )
-    console = Console()
-
-    def prompt_for_input(prompt: str) -> str:
-        return input(f"{prompt}: ")
-
-    def before_step(tutorial, step_index, step, run) -> None:
-        render_step_prompt(
-            console,
-            tutorial.title,
-            step_index + 1,
-            len(tutorial.steps),
-            step.title,
-            step.instructions,
-            run.workspace,
-        )
-
     try:
+        tutorial_runner = build_runner(
+            namespace=namespace,
+            state_root=state_root,
+            tutorial_paths=require_tutorial_paths(
+                effective_tutorial_paths(
+                    tutorial_paths,
+                    tuple(args.tutorial_path),
+                )
+            ),
+            shell_runner=shell_runner,
+            allow_shell_checks=allow_shell_checks or args.allow_shell_checks,
+        )
+        console = Console()
+
+        def prompt_for_input(prompt: str) -> str:
+            return input(f"{prompt}: ")
+
+        def before_step(tutorial, step_index, step, run) -> None:
+            render_step_prompt(
+                console,
+                tutorial.title,
+                step_index + 1,
+                len(tutorial.steps),
+                step.title,
+                step.instructions,
+                run.workspace,
+            )
+
         result = run_tutorial_with_menu(
             tutorial_runner,
             args.tutorial_id,
@@ -1163,7 +1358,7 @@ def argparse_run_command(
             console=console,
             prompt_for_input=prompt_for_input,
         )
-    except (KeyError, RuntimeError) as error:
+    except (KeyError, RuntimeError, ValueError) as error:
         print(error)
         return 1
 

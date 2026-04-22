@@ -4,8 +4,8 @@
 The [[tutorial]] package is organised around one practical constraint:
 the first version should make shell-based tutorials possible without a
 full terminal UI framework.  We therefore keep the package surface
-small and expose a runner, a persistent state store, the built-in
-tutorial registry, and the CLI integration helpers.
+small and expose a runner, a persistent state store, the file-backed
+tutorial catalog, and the CLI integration helpers.
 
 This chapter only re-exports the public pieces.  The actual behaviour
 lives in the later chapters.
@@ -24,6 +24,7 @@ __all__ = [
     "StateStore",
     "StepTranscript",
     "Tutorial",
+    "TutorialCatalog",
     "TutorialRun",
     "TutorialRunner",
     "TutorialStep",
@@ -58,12 +59,13 @@ from tutorial.cli import add_argparse_subcommand
 from tutorial.cli import add_typer_subcommand
 from tutorial.cli import app
 from tutorial.cli import create_app
+from tutorial.catalog import TutorialCatalog
+from tutorial.catalog import get_tutorial
+from tutorial.catalog import get_tutorials
 from tutorial.model import StepTranscript
 from tutorial.model import Tutorial
 from tutorial.model import TutorialRun
 from tutorial.model import TutorialStep
-from tutorial.model import get_tutorial
-from tutorial.model import get_tutorials
 from tutorial.run import RunResult
 from tutorial.run import TutorialRunner
 from tutorial.shell import run_interactive_shell
@@ -72,15 +74,14 @@ from tutorial.state import ProgressState
 from tutorial.state import StateStore
 @
 
-Let's verify that the package exports both the built-in tutorials and
-the CLI helper functions.
+Let's verify that the package exports the file-backed lookup helpers and
+the CLI integration helpers.
 
 <<test functions>>=
-def test_package_exports_example_tutorial():
-    tutorial = get_tutorial("shell-basics")
-
-    assert tutorial.id == "shell-basics"
-    assert tutorial.steps
+def test_package_exports_catalog_helpers():
+    assert callable(get_tutorial)
+    assert callable(get_tutorials)
+    assert TutorialCatalog.__name__ == "TutorialCatalog"
 
 
 def test_package_exports_cli_helpers():

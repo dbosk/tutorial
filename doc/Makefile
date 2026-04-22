@@ -6,6 +6,7 @@ all: tutorial.pdf
 weave: tutorial.tex
 
 ../src/tutorial/tutorial.tex: ../src/tutorial/tutorial.nw
+../src/tutorial/catalog.tex: ../src/tutorial/catalog.nw
 ../src/tutorial/model.tex: ../src/tutorial/model.nw
 ../src/tutorial/state.tex: ../src/tutorial/state.nw
 ../src/tutorial/shell.tex: ../src/tutorial/shell.nw
@@ -20,6 +21,7 @@ weave: tutorial.tex
 
 tutorial.pdf: tutorial.tex
 tutorial.pdf: ../src/tutorial/tutorial.tex
+tutorial.pdf: ../src/tutorial/catalog.tex
 tutorial.pdf: ../src/tutorial/model.tex
 tutorial.pdf: ../src/tutorial/state.tex
 tutorial.pdf: ../src/tutorial/shell.tex

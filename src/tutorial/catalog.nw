@@ -1,0 +1,604 @@
+\chapter{Tutorial Catalog}
+\label{tutorial-catalog}
+
+The tutorial definitions no longer live in Python code.  Instead, the
+package reads one Markdown file per tutorial and turns those files into
+the same in-memory [[Tutorial]] and [[TutorialStep]] objects that the
+runner already understands.
+
+That split keeps the authoring workflow simple.  Tutorial authors can
+write ordinary Markdown with YAML front matter, while the runtime keeps a
+small, typed model that the rest of the package can trust.
+
+
+\section{Code overview}
+
+<<[[catalog.py]]>>=
+"""Load tutorial definitions from Markdown files."""
+
+<<imports>>
+
+<<classes>>
+<<constants>>
+<<functions>>
+@
+
+<<test [[catalog.py]]>>=
+"""Tests for the tutorial catalog."""
+
+from pathlib import Path
+
+import pytest
+
+from tutorial.catalog import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The catalog layer combines three small tools:
+\begin{description}
+\item[[[pathlib]]]
+  to resolve explicit tutorial paths.
+\item[[[hashlib]]]
+  to fingerprint tutorial files so resumed runs can detect changes.
+\item[[[yaml]]]
+  to parse the familiar front matter format.
+\end{description}
+
+<<imports>>=
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import yaml
+
+from tutorial.model import Tutorial
+from tutorial.model import TutorialStep
+@
+
+
+\section{The loaded tutorial catalog}
+
+The runner needs two operations from the catalog: list every available
+tutorial and look up one tutorial by ID.  We therefore load the files up
+front and keep both the ordered tuple and a direct lookup table.
+
+<<classes>>=
+class TutorialCatalog:
+    """Load tutorial definitions from explicit Markdown paths."""
+
+    <<tutorial catalog methods>>
+@
+
+
+\subsection{Initialising the catalog}
+
+We resolve paths and parse files once during initialisation so the rest of
+the package can treat the catalog as a stable snapshot.
+
+<<tutorial catalog methods>>=
+def __init__(self, tutorial_paths: tuple[str | Path, ...]):
+    """Load tutorials from ``tutorial_paths``."""
+
+    self.tutorial_paths = tuple(Path(path) for path in tutorial_paths)
+    if self.tutorial_paths:
+        self.files = resolve_tutorial_files(self.tutorial_paths)
+        self.tutorials = tuple(load_tutorial_file(path) for path in self.files)
+    else:
+        self.files = ()
+        self.tutorials = ()
+    self.tutorials_by_id = {}
+    for tutorial in self.tutorials:
+        if tutorial.id in self.tutorials_by_id:
+            raise ValueError(f"Duplicate tutorial ID {tutorial.id!r}.")
+        self.tutorials_by_id[tutorial.id] = tutorial
+@
+
+Let's verify that duplicate IDs are rejected before the runner sees an
+ambiguous catalog.
+
+<<test functions>>=
+def test_tutorial_catalog_rejects_duplicate_ids(tmp_path):
+    first = tmp_path / "one.md"
+    second = tmp_path / "two.md"
+    first.write_text(
+        "---\nid: demo\ntitle: Demo\nsummary: One.\n---\n\n# Step\n\nDo it.\n"
+    )
+    second.write_text(
+        "---\nid: demo\ntitle: Demo again\nsummary: Two.\n---\n\n# Step\n\nDo it.\n"
+    )
+
+    with pytest.raises(ValueError, match="Duplicate tutorial ID"):
+        TutorialCatalog((tmp_path,))
+@
+
+<<test functions>>=
+def test_tutorial_catalog_can_be_empty_for_review_only_use():
+    catalog = TutorialCatalog(())
+
+    assert catalog.get_tutorials() == ()
+@
+
+
+\subsection{Listing tutorials from the catalog}
+
+The CLI needs the loaded tutorials in display order, so we expose the
+ordered tuple directly.
+
+<<tutorial catalog methods>>=
+def get_tutorials(self) -> tuple[Tutorial, ...]:
+    """Return the loaded tutorials in display order."""
+
+    return self.tutorials
+@
+
+<<test functions>>=
+def test_catalog_get_tutorials_returns_loaded_tutorials(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\nid: demo\ntitle: Demo\nsummary: A short tutorial.\n---\n\n"
+        "# Step one\n\nDo it.\n"
+    )
+
+    tutorials = TutorialCatalog((tutorial_path,)).get_tutorials()
+
+    assert tutorials[0].id == "demo"
+@
+
+
+\subsection{Looking up one tutorial by ID}
+
+The CLI should fail early with a useful error when the user asks for a
+missing tutorial.
+
+<<tutorial catalog methods>>=
+def get_tutorial(self, tutorial_id: str) -> Tutorial:
+    """Return the loaded tutorial with the given ID."""
+
+    tutorial = self.tutorials_by_id.get(tutorial_id)
+    if tutorial is not None:
+        return tutorial
+
+    available = ", ".join(item.id for item in self.tutorials)
+    raise KeyError(
+        f"Unknown tutorial {tutorial_id!r}. Available tutorials: {available}"
+    )
+@
+
+<<test functions>>=
+def test_catalog_get_tutorial_rejects_unknown_ids(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\nid: demo\ntitle: Demo\nsummary: A short tutorial.\n---\n\n"
+        "# Step one\n\nDo it.\n"
+    )
+
+    catalog = TutorialCatalog((tutorial_path,))
+
+    with pytest.raises(KeyError, match="Available tutorials"):
+        catalog.get_tutorial("missing")
+@
+
+
+\section{Resolving explicit tutorial paths}
+
+The standalone CLI should only use paths that were given explicitly.
+That still leaves one small convenience choice: if the explicit path is a
+directory, we load every Markdown file below it.
+
+<<functions>>=
+def resolve_tutorial_files(
+    tutorial_paths: tuple[str | Path, ...],
+) -> tuple[Path, ...]:
+    """Return the Markdown tutorial files addressed by ``tutorial_paths``."""
+
+    if not tutorial_paths:
+        raise ValueError("No tutorial paths configured. Pass --tutorial-path.")
+
+    files = []
+    seen = set()
+    for raw_path in tutorial_paths:
+        path = Path(raw_path)
+        if not path.exists():
+            raise ValueError(f"Tutorial path {path} does not exist.")
+
+        if path.is_dir():
+            candidates = sorted(
+                item for item in path.rglob("*.md") if item.is_file()
+            )
+            if not candidates:
+                raise ValueError(
+                    f"Tutorial path {path} does not contain any .md files."
+                )
+        else:
+            if path.suffix.lower() != ".md":
+                raise ValueError(
+                    f"Tutorial file {path} must use the .md extension."
+                )
+            candidates = [path]
+
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(resolved)
+
+    return tuple(files)
+@
+
+Let's verify that a single file and a directory can be mixed in one
+explicit path list.
+
+<<test functions>>=
+def test_resolve_tutorial_files_accepts_file_and_directory(tmp_path):
+    first = tmp_path / "one.md"
+    first.write_text("demo")
+    directory = tmp_path / "more"
+    directory.mkdir()
+    second = directory / "two.md"
+    second.write_text("demo")
+
+    files = resolve_tutorial_files((first, directory))
+
+    assert files == (first.resolve(), second.resolve())
+@
+
+<<test functions>>=
+def test_resolve_tutorial_files_requires_explicit_paths():
+    with pytest.raises(ValueError, match="Pass --tutorial-path"):
+        resolve_tutorial_files(())
+@
+
+
+\section{Parsing the YAML front matter}
+
+Each tutorial file starts with a front matter block delimited by
+[[---]].  We separate that block from the Markdown body before doing any
+further parsing so the step splitter never has to know about front matter.
+
+<<functions>>=
+def split_yaml_front_matter(text: str) -> tuple[str, str]:
+    """Return ``(front_matter, body)`` for one tutorial file."""
+
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(
+            "Tutorial files must start with YAML front matter delimited by ---."
+        )
+
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "".join(lines[1:index]), "".join(lines[index + 1 :])
+
+    raise ValueError("Tutorial front matter is missing its closing ---.")
+@
+
+<<test functions>>=
+def test_split_yaml_front_matter_requires_delimiters():
+    with pytest.raises(ValueError, match="YAML front matter"):
+        split_yaml_front_matter("# Step\n\nDo it.\n")
+@
+
+
+\section{Reading top-level tutorial metadata}
+
+The front matter must be a small YAML mapping.  We keep the schema narrow
+so mistakes fail fast and tutorial authors can see exactly what the file
+is expected to provide.
+
+<<functions>>=
+def front_matter_mapping(front_matter: str) -> dict:
+    """Return the parsed YAML mapping for one tutorial front matter block."""
+
+    payload = yaml.safe_load(front_matter) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("Tutorial front matter must be a YAML mapping.")
+    return payload
+@
+
+
+\section{Loading one tutorial file}
+
+Loading a tutorial file is the point where the textual format becomes the
+typed runtime model.
+
+<<functions>>=
+def load_tutorial_file(path: str | Path) -> Tutorial:
+    """Load one Markdown tutorial file into a [[Tutorial]]."""
+
+    tutorial_path = Path(path)
+    text = tutorial_path.read_text()
+    front_matter, body = split_yaml_front_matter(text)
+    metadata = front_matter_mapping(front_matter)
+    reject_unknown_keys(metadata, {"id", "title", "summary"}, "Tutorial")
+
+    steps = tuple(
+        build_tutorial_step(title, section_body)
+        for title, section_body in split_step_sections(body)
+    )
+    return Tutorial(
+        id=require_string(metadata, "id", "Tutorial"),
+        title=require_string(metadata, "title", "Tutorial"),
+        summary=require_string(metadata, "summary", "Tutorial"),
+        steps=steps,
+        source_path=str(tutorial_path.resolve()),
+        source_digest=build_source_digest(text),
+    )
+@
+
+Let's verify that the loader extracts both the tutorial metadata and the
+step Markdown.
+
+<<test functions>>=
+def test_load_tutorial_file_parses_front_matter_and_steps(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do the first thing.\n\n"
+        "# Step two\n\n"
+        "Do the second thing.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.id == "demo"
+    assert tutorial.title == "Demo"
+    assert tutorial.steps[0].instructions == "Do the first thing."
+    assert tutorial.source_path == str(tutorial_path.resolve())
+    assert tutorial.source_digest
+@
+
+
+\section{Splitting the Markdown body into steps}
+
+Each top-level heading begins a new tutorial step.  Lower-level headings
+remain part of the step body, which lets tutorial authors keep ordinary
+Markdown structure inside a step.
+
+<<functions>>=
+def split_step_sections(body: str) -> tuple[tuple[str, str], ...]:
+    """Return ``(title, body)`` pairs for each top-level step heading."""
+
+    sections = []
+    title = None
+    body_lines = []
+    for line in body.splitlines():
+        if line.startswith("# "):
+            if title is not None:
+                sections.append((title, "\n".join(body_lines).strip()))
+            title = line[2:].strip()
+            if not title:
+                raise ValueError("Tutorial step headings must not be empty.")
+            body_lines = []
+            continue
+
+        if title is None:
+            if line.strip():
+                raise ValueError(
+                    "Tutorial body must begin with a top-level step heading."
+                )
+            continue
+
+        body_lines.append(line)
+
+    if title is None:
+        raise ValueError("Tutorial files must define at least one step.")
+
+    sections.append((title, "\n".join(body_lines).strip()))
+    return tuple(sections)
+@
+
+
+\section{Optional per-step metadata blocks}
+
+Most of the step body should stay ordinary Markdown.  Validation rules and
+hints are the exception, so we reserve a small leading code fence with the
+language tag [[tutorial-step]] for that metadata.
+
+<<constants>>=
+STEP_METADATA_FENCE = "```tutorial-step"
+@
+
+<<functions>>=
+def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
+    """Return ``(metadata, instructions)`` for one step body."""
+
+    stripped_body = section_body.strip()
+    lines = stripped_body.splitlines()
+    if not lines or lines[0].strip() != STEP_METADATA_FENCE:
+        return {}, stripped_body
+
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "```":
+            metadata = yaml.safe_load("\n".join(lines[1:index])) or {}
+            if not isinstance(metadata, dict):
+                raise ValueError("Tutorial step metadata must be a YAML mapping.")
+            instructions = "\n".join(lines[index + 1 :]).strip()
+            return metadata, instructions
+
+    raise ValueError("Tutorial step metadata is missing its closing ``` fence.")
+@
+
+\section{Building one tutorial step}
+
+Once the optional metadata block is separated from the Markdown body, the
+remaining conversion is a straightforward mapping onto [[TutorialStep]].
+
+<<functions>>=
+def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
+    """Build one tutorial step from a parsed Markdown section."""
+
+    metadata, instructions = step_metadata_and_instructions(section_body)
+    reject_unknown_keys(
+        metadata,
+        {"required_patterns", "check_command", "hint"},
+        f"Step {title!r}",
+    )
+    if not instructions:
+        raise ValueError(f"Step {title!r} must contain instructions.")
+
+    return TutorialStep(
+        title=title,
+        instructions=instructions,
+        required_patterns=string_tuple(
+            metadata.get("required_patterns"),
+            f"Step {title!r} required_patterns",
+        ),
+        check_command=optional_string(
+            metadata.get("check_command"),
+            f"Step {title!r} check_command",
+        ),
+        hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
+    )
+@
+
+Let's verify that a leading metadata block is parsed while ordinary code
+fences remain part of the student-facing instructions.
+
+<<test functions>>=
+def test_load_tutorial_file_parses_step_metadata_block(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - pwd\n"
+        "check_command: test -f notes.txt\n"
+        "hint: Try pwd first.\n"
+        "```\n\n"
+        "Run `pwd`.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].required_patterns == ("pwd",)
+    assert tutorial.steps[0].check_command == "test -f notes.txt"
+    assert tutorial.steps[0].hint == "Try pwd first."
+    assert tutorial.steps[0].instructions == "Run `pwd`."
+@
+
+<<test functions>>=
+def test_load_tutorial_file_keeps_regular_code_fences_in_instructions(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```bash\n"
+        "pwd\n"
+        "```\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].instructions == "```bash\npwd\n```"
+@
+
+
+\section{Fingerprinting one tutorial file}
+
+Resuming an unfinished run only makes sense if the tutorial definition is
+still the same as when the run began.  A file digest gives the runner a
+small, stable identity check.
+
+<<functions>>=
+def build_source_digest(text: str) -> str:
+    """Return a stable digest for one tutorial source file."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+@
+
+
+\section{Validating small YAML values}
+
+The YAML schema is intentionally small, but the loader still needs a few
+helpers so that type errors produce clear, local messages.
+
+<<functions>>=
+def reject_unknown_keys(metadata: dict, allowed: set[str], context: str) -> None:
+    """Reject keys that are not part of the supported schema."""
+
+    unknown = sorted(key for key in metadata if key not in allowed)
+    if unknown:
+        names = ", ".join(repr(key) for key in unknown)
+        raise ValueError(f"{context} contains unsupported keys: {names}.")
+@
+
+<<functions>>=
+def require_string(metadata: dict, key: str, context: str) -> str:
+    """Return the non-empty string field ``key`` from ``metadata``."""
+
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context} requires a non-empty string field {key!r}.")
+    return value.strip()
+@
+
+<<functions>>=
+def optional_string(value: object, context: str) -> str | None:
+    """Return ``value`` as a string or [[None]]."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context} must be a non-empty string when set.")
+    return value.strip()
+@
+
+<<functions>>=
+def string_tuple(value: object, context: str) -> tuple[str, ...]:
+    """Return ``value`` as a tuple of strings."""
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a YAML list of strings.")
+
+    items = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"{context} must only contain non-empty strings.")
+        items.append(item)
+    return tuple(items)
+@
+
+
+\section{Public convenience helpers}
+
+The package root re-exports small helper functions alongside the catalog
+class because some callers only need a one-shot lookup.
+
+<<functions>>=
+def get_tutorials(tutorial_paths: tuple[str | Path, ...]) -> tuple[Tutorial, ...]:
+    """Return the tutorials loaded from ``tutorial_paths``."""
+
+    return TutorialCatalog(tutorial_paths).get_tutorials()
+@
+
+<<functions>>=
+def get_tutorial(
+    tutorial_id: str,
+    tutorial_paths: tuple[str | Path, ...],
+) -> Tutorial:
+    """Return ``tutorial_id`` from ``tutorial_paths``."""
+
+    return TutorialCatalog(tutorial_paths).get_tutorial(tutorial_id)
+@
