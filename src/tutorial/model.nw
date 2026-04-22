@@ -53,6 +53,11 @@ Each step needs enough information for two different readers.
 The student needs a title and instructions, while the runner needs a
 small, explicit check that tells it whether the student can move on.
 
+The student-facing prose is still stored as plain strings, but we author
+those strings as Markdown.  That gives the CLI room to render short
+paragraphs and inline commands without inventing a larger tutorial markup
+format in the first release.
+
 We support two complementary checks:
 \begin{description}
 \item[Transcript patterns] small strings that should appear in the saved
@@ -208,6 +213,10 @@ the per-step shell works, it produces a file in the dedicated workspace,
 and it creates enough transcript material for the review command to show
 something meaningful afterwards.
 
+We also keep the prose short and paragraph-based.  The goal is not just
+to validate shell commands, but to make the first-run experience readable
+when it is rendered as Markdown in the terminal.
+
 <<constants>>=
 BUILTIN_TUTORIALS = (
     Tutorial(
@@ -220,8 +229,9 @@ BUILTIN_TUTORIALS = (
             TutorialStep(
                 title="Inspect the workspace",
                 instructions=(
-                    "Run `pwd` and `ls` so you can see where this tutorial "
-                    "stores its work."
+                    "Run `pwd` and `ls`.\n\n"
+                    "This shows where the tutorial stores its work for this "
+                    "run."
                 ),
                 required_patterns=("pwd", "ls"),
                 hint="The shell starts in the tutorial workspace.",
@@ -229,17 +239,22 @@ BUILTIN_TUTORIALS = (
             TutorialStep(
                 title="Create a note",
                 instructions=(
-                    "Create `notes.txt` containing the word `tutorial`. "
-                    "For example: `printf 'tutorial\n' > notes.txt`."
+                    "Create `notes.txt` containing the word `tutorial`.\n\n"
+                    "One way is:\n\n"
+                    "`printf 'tutorial\\n' > notes.txt`"
                 ),
                 check_command="test -f notes.txt && grep -q tutorial notes.txt",
-                hint="Any command sequence is fine if the file exists afterwards.",
+                hint=(
+                    "Any command sequence is fine if `notes.txt` exists "
+                    "afterwards."
+                ),
             ),
             TutorialStep(
                 title="Review the note",
                 instructions=(
-                    "Display the file with `cat notes.txt` so the transcript "
-                    "shows both the command and its output."
+                    "Display the file with `cat notes.txt`.\n\n"
+                    "The transcript should show both the command and the "
+                    "file contents."
                 ),
                 required_patterns=("cat notes.txt", "tutorial"),
                 check_command="grep -q tutorial notes.txt",

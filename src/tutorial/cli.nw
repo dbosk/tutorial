@@ -28,11 +28,14 @@ app = create_app()
 """Tests for the CLI helpers."""
 
 import argparse
+from io import StringIO
 
+from rich.console import Console
 from typer.testing import CliRunner
 
 from tutorial.cli import *
 from tutorial.model import StepTranscript
+from tutorial.shell import run_scripted_shell
 from tutorial.state import StateStore
 
 <<test functions>>
@@ -52,6 +55,8 @@ from pathlib import Path
 from typing import Annotated
 from typing import Callable
 
+from rich.console import Console
+from rich.markdown import Markdown
 import typer
 
 from tutorial.run import RunResult
@@ -185,42 +190,411 @@ def test_format_review_output_groups_transcripts_by_step():
 \section{Formatting step prompts}
 
 Each step opens a fresh shell, so the CLI must print the instructions
-before the shell starts.  The text also reminds the student that leaving
-the shell returns control to the tutorial runner.
+before the shell starts.  We author that student-facing text as Markdown
+and render it with Rich [[Markdown]] so paragraphs and inline commands
+read cleanly in an ordinary terminal.
+
+A little vertical space around the body matters too.  Without it, the
+workspace line, the instructions, and the exit reminder blur together
+into one dense block of text.
 
 <<functions>>=
-def format_step_prompt(
+def render_step_prompt(
+    console: Console,
     tutorial_title: str,
     step_number: int,
     total_steps: int,
     step_title: str,
     instructions: str,
     workspace: str,
-) -> str:
-    """Return the prompt shown before one interactive step."""
+) -> None:
+    """Render the prompt shown before one interactive step."""
 
-    return (
-        f"{tutorial_title}\n"
-        f"Step {step_number}/{total_steps}: {step_title}\n"
-        f"Workspace: {workspace}\n"
-        f"{instructions}\n"
-        "Exit the shell when you want the tutorial to validate the step."
+    console.print()
+    console.print(tutorial_title, style="bold")
+    console.print(
+        f"Step {step_number}/{total_steps}: {step_title}",
+        style="bold",
     )
+    console.print(f"Workspace: {workspace}", style="dim")
+    console.print()
+    console.print(Markdown(instructions))
+    console.print()
+    console.print(
+        "Exit the shell when you want the tutorial to validate the step.",
+        style="dim",
+    )
+    console.print()
 @
 
 <<test functions>>=
-def test_format_step_prompt_mentions_workspace_and_exit():
-    prompt = format_step_prompt(
+def test_render_step_prompt_uses_markdown_and_spacing():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_step_prompt(
+        console,
         "Shell Basics",
         1,
         3,
         "Inspect the workspace",
-        "Run pwd and ls.",
+        "Run `pwd` and `ls`.\n\nThis shows where the tutorial stores its work.",
         "/tmp/demo",
     )
 
-    assert "Step 1/3" in prompt
-    assert "Exit the shell" in prompt
+    output = buffer.getvalue()
+    assert "Step 1/3: Inspect the workspace" in output
+    assert "Workspace: /tmp/demo\n\n" in output
+    assert "Run pwd and ls." in output
+    assert "This shows where the tutorial stores its work." in output
+    assert "\n\nExit the shell when you want" in output
+    assert "`pwd`" not in output
+@
+
+
+\section{Rendering hints for blocked steps}
+
+Hints are part of the student-facing tutorial text too.  Rendering them
+through the same Markdown path keeps inline commands looking consistent
+between the pre-step prompt and the follow-up guidance after a failed
+step.
+
+<<functions>>=
+def render_hint(console: Console, hint: str) -> None:
+    """Render a step hint as Markdown."""
+
+    console.print()
+    console.print("Hint", style="bold")
+    console.print(Markdown(hint))
+    console.print()
+@
+
+<<test functions>>=
+def test_render_hint_uses_markdown():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_hint(console, "Try `pwd` before `ls`.")
+
+    output = buffer.getvalue()
+    assert "Hint" in output
+    assert "Try pwd before ls." in output
+    assert "`pwd`" not in output
+@
+
+
+\section{Choosing what to do after a failed step}
+
+The runner already persists failed attempts and leaves the tutorial at the
+same unfinished step.  That means the CLI can offer a small menu after a
+failure without adding any new resume state of its own.
+
+We accept both the full phrases and short aliases.  The full phrases keep
+the prompt readable for students, while the aliases make repeated retries
+quick.
+
+<<functions>>=
+def normalise_blocked_step_action(choice: str) -> str | None:
+    """Return the canonical failed-step action for ``choice``."""
+
+    normalised = " ".join(choice.strip().lower().split())
+    return {
+        "r": "read_again",
+        "read": "read_again",
+        "read again": "read_again",
+        "t": "try_again",
+        "try": "try_again",
+        "try again": "try_again",
+        "retry": "try_again",
+        "h": "hint",
+        "hint": "hint",
+        "e": "exit",
+        "exit": "exit",
+    }.get(normalised)
+@
+
+Let's verify that both the readable phrases and the short aliases map to
+the same actions.
+
+<<test functions>>=
+def test_normalise_blocked_step_action_accepts_long_and_short_forms():
+    assert normalise_blocked_step_action("read again") == "read_again"
+    assert normalise_blocked_step_action("r") == "read_again"
+    assert normalise_blocked_step_action("try again") == "try_again"
+    assert normalise_blocked_step_action("retry") == "try_again"
+    assert normalise_blocked_step_action("h") == "hint"
+    assert normalise_blocked_step_action("exit") == "exit"
+    assert normalise_blocked_step_action("nope") is None
+@
+
+
+\section{Prompting until the user chooses a valid action}
+
+The CLI should not throw the student out of the tutorial flow because of a
+typo at the menu prompt.  We therefore keep asking until the answer maps
+to one of the supported actions.
+
+<<functions>>=
+def prompt_for_blocked_step_action(
+    console: Console,
+    prompt_for_input: Callable[[str], str],
+) -> str:
+    """Ask until the user chooses a supported failed-step action."""
+
+    prompt = "Choose [read again / try again / hint / exit]"
+    while True:
+        action = normalise_blocked_step_action(prompt_for_input(prompt))
+        if action is not None:
+            return action
+
+        console.print(
+            "Choose one of: read again, try again, hint, exit.",
+            style="dim",
+        )
+@
+
+<<test functions>>=
+def test_prompt_for_blocked_step_action_reprompts_after_invalid_input():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+    answers = iter(["maybe", "hint"])
+
+    action = prompt_for_blocked_step_action(
+        console,
+        lambda prompt: next(answers),
+    )
+
+    assert action == "hint"
+    assert "Choose one of: read again, try again, hint, exit." in buffer.getvalue()
+@
+
+
+\section{Handling a blocked step}
+
+The menu itself stays in the CLI layer because the runner already knows
+how to resume the same unfinished step on the next call.  The CLI only
+needs to decide whether to show the instructions again, reveal the hint,
+try the step again, or stop.
+
+<<functions>>=
+def blocked_step_number(result: RunResult) -> int:
+    """Return the 1-based number of the blocked step."""
+
+    if result.blocked_transcript is not None:
+        return result.blocked_transcript.step_index + 1
+    return result.progress.completed_steps + 1
+@
+
+<<functions>>=
+def handle_blocked_step(
+    result: RunResult,
+    *,
+    console: Console,
+    prompt_for_input: Callable[[str], str],
+) -> str:
+    """Offer follow-up actions for a blocked tutorial step."""
+
+    if result.blocked_step is None:
+        raise ValueError("Blocked-step handling requires a blocked step.")
+
+    console.print()
+    console.print(f"Step not complete yet: {result.blocked_step.title}", style="bold")
+
+    while True:
+        action = prompt_for_blocked_step_action(console, prompt_for_input)
+        if action == "read_again":
+            render_step_prompt(
+                console,
+                result.tutorial.title,
+                blocked_step_number(result),
+                len(result.tutorial.steps),
+                result.blocked_step.title,
+                result.blocked_step.instructions,
+                result.run.workspace,
+            )
+            continue
+
+        if action == "hint":
+            if result.blocked_step.hint:
+                render_hint(console, result.blocked_step.hint)
+            else:
+                console.print()
+                console.print("No hint available for this step.", style="dim")
+                console.print()
+            continue
+
+        return action
+@
+
+Let's verify that the menu can show the instructions again, render a
+hint, and then continue with a retry.
+
+<<test functions>>=
+def test_handle_blocked_step_can_reread_and_show_hint(tmp_path):
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+    tutorial = build_runner(state_root=tmp_path).list_tutorials()[0][0]
+    run = StateStore(tmp_path).start_run(tutorial.id)
+    answers = iter(["read again", "hint", "try again"])
+    result = RunResult(
+        tutorial=tutorial,
+        run=run,
+        progress=ProgressState(
+            tutorial_id=tutorial.id,
+            total_steps=len(tutorial.steps),
+            completed_steps=0,
+            finished=False,
+        ),
+        executed_steps=1,
+        blocked_step=tutorial.steps[0],
+        blocked_transcript=StepTranscript(
+            tutorial_id=tutorial.id,
+            step_index=0,
+            title=tutorial.steps[0].title,
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd\n",
+            passed=False,
+        ),
+    )
+
+    action = handle_blocked_step(
+        result,
+        console=console,
+        prompt_for_input=lambda prompt: next(answers),
+    )
+
+    output = buffer.getvalue()
+    assert action == "try_again"
+    assert "Step not complete yet: Inspect the workspace" in output
+    assert "Run pwd and ls." in output
+    assert "Hint" in output
+@
+
+
+\section{Running until the tutorial completes or the user exits}
+
+One failed step should not force the student to restart the whole command.
+Because the runner persists each attempt immediately, the CLI can call it
+again after a [[try again]] choice and let the runner resume exactly where
+it left off.
+
+<<functions>>=
+def run_tutorial_with_menu(
+    tutorial_runner: TutorialRunner,
+    tutorial_id: str,
+    *,
+    restart: bool,
+    before_step: Callable[..., None],
+    console: Console,
+    prompt_for_input: Callable[[str], str],
+) -> RunResult:
+    """Run a tutorial command with a failed-step action menu."""
+
+    pending_restart = restart
+    while True:
+        result = tutorial_runner.run(
+            tutorial_id,
+            restart=pending_restart,
+            before_step=before_step,
+        )
+        pending_restart = False
+        if result.blocked_step is None:
+            return result
+
+        action = handle_blocked_step(
+            result,
+            console=console,
+            prompt_for_input=prompt_for_input,
+        )
+        if action == "exit":
+            return result
+@
+
+<<test functions>>=
+def test_run_tutorial_with_menu_retries_until_success(tmp_path):
+    commands = iter(
+        [
+            "pwd\n",
+            "pwd\nls\n",
+            "printf 'tutorial\\n' > notes.txt\n",
+            "cat notes.txt\n",
+        ]
+    )
+
+    def scripted_runner(*, workspace):
+        return run_scripted_shell(next(commands), workspace=workspace)
+
+    tutorial_runner = build_runner(
+        state_root=tmp_path,
+        shell_runner=scripted_runner,
+    )
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+    actions = iter(["try again"])
+
+    result = run_tutorial_with_menu(
+        tutorial_runner,
+        "shell-basics",
+        restart=False,
+        before_step=lambda tutorial, step_index, step, run: None,
+        console=console,
+        prompt_for_input=lambda prompt: next(actions),
+    )
+
+    assert result.progress.finished is True
+    assert result.blocked_step is None
+
+
+def test_run_tutorial_with_menu_can_exit_after_failed_step(tmp_path):
+    commands = iter(["pwd\n"])
+
+    def scripted_runner(*, workspace):
+        return run_scripted_shell(next(commands), workspace=workspace)
+
+    tutorial_runner = build_runner(
+        state_root=tmp_path,
+        shell_runner=scripted_runner,
+    )
+    console = Console(file=StringIO(), force_terminal=False, color_system=None)
+
+    result = run_tutorial_with_menu(
+        tutorial_runner,
+        "shell-basics",
+        restart=False,
+        before_step=lambda tutorial, step_index, step, run: None,
+        console=console,
+        prompt_for_input=lambda prompt: "exit",
+    )
+
+    assert result.blocked_step is not None
+    assert result.progress.finished is False
 @
 
 
@@ -271,29 +645,38 @@ def create_app(
         """Run or resume one tutorial."""
 
         tutorial_runner = runner()
+        console = Console()
+
+        def prompt_for_input(prompt: str) -> str:
+            return typer.prompt(prompt)
 
         def before_step(tutorial, step_index, step, run) -> None:
-            typer.echo(
-                format_step_prompt(
-                    tutorial.title,
-                    step_index + 1,
-                    len(tutorial.steps),
-                    step.title,
-                    step.instructions,
-                    run.workspace,
-                )
+            render_step_prompt(
+                console,
+                tutorial.title,
+                step_index + 1,
+                len(tutorial.steps),
+                step.title,
+                step.instructions,
+                run.workspace,
             )
 
         try:
-            result = tutorial_runner.run(
+            result = run_tutorial_with_menu(
+                tutorial_runner,
                 tutorial_id,
                 restart=restart,
                 before_step=before_step,
+                console=console,
+                prompt_for_input=prompt_for_input,
             )
         except KeyError as error:
             raise typer.BadParameter(str(error), param_hint="tutorial_id")
         except RuntimeError as error:
             typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+
+        if result.blocked_step is not None:
             raise typer.Exit(code=1)
 
         emit_run_summary(result)
@@ -380,6 +763,31 @@ def test_review_command_shows_saved_transcript(tmp_path):
 
     assert result.exit_code == 0
     assert "Inspect the workspace" in result.stdout
+
+
+def test_run_command_can_retry_a_failed_step(tmp_path):
+    commands = iter(
+        [
+            "pwd\n",
+            "pwd\nls\n",
+            "printf 'tutorial\\n' > notes.txt\n",
+            "cat notes.txt\n",
+        ]
+    )
+
+    def scripted_runner(*, workspace):
+        return run_scripted_shell(next(commands), workspace=workspace)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_app(state_root=tmp_path, shell_runner=scripted_runner),
+        ["run", "shell-basics"],
+        input="try again\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Step not complete yet: Inspect the workspace" in result.stdout
+    assert "Completed shell-basics" in result.stdout
 @
 
 
@@ -405,7 +813,7 @@ def emit_run_summary(result: RunResult) -> None:
             err=True,
         )
         if result.blocked_step.hint:
-            typer.echo(f"Hint: {result.blocked_step.hint}", err=True)
+            render_hint(Console(stderr=True), result.blocked_step.hint)
         raise typer.Exit(code=1)
 
     typer.echo(
@@ -644,27 +1052,36 @@ def argparse_run_command(
         state_root=state_root,
         shell_runner=shell_runner,
     )
+    console = Console()
+
+    def prompt_for_input(prompt: str) -> str:
+        return input(f"{prompt}: ")
 
     def before_step(tutorial, step_index, step, run) -> None:
-        print(
-            format_step_prompt(
-                tutorial.title,
-                step_index + 1,
-                len(tutorial.steps),
-                step.title,
-                step.instructions,
-                run.workspace,
-            )
+        render_step_prompt(
+            console,
+            tutorial.title,
+            step_index + 1,
+            len(tutorial.steps),
+            step.title,
+            step.instructions,
+            run.workspace,
         )
 
     try:
-        result = tutorial_runner.run(
+        result = run_tutorial_with_menu(
+            tutorial_runner,
             args.tutorial_id,
             restart=args.restart,
             before_step=before_step,
+            console=console,
+            prompt_for_input=prompt_for_input,
         )
     except (KeyError, RuntimeError) as error:
         print(error)
+        return 1
+
+    if result.blocked_step is not None:
         return 1
 
     try:
