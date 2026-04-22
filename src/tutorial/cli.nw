@@ -136,35 +136,53 @@ def test_format_progress_line_includes_status_and_summary():
 Review is small by design, but it still needs enough structure that a
 student can distinguish one step's transcript from the next.
 
+Rich helps with the headings and spacing, but the transcript itself is
+not authored Markdown.  It is shell output, so review must print it
+literally rather than treating square brackets or similar text as Rich
+markup.
+
 <<functions>>=
-def format_review_output(
+def render_review_output(
+    console: Console,
     tutorial_title: str,
     run_id: str,
     workspace: str,
     transcripts: tuple[StepTranscript, ...],
-) -> str:
-    """Return formatted review text for saved transcripts."""
+) -> None:
+    """Render formatted review output for saved transcripts."""
 
-    lines = [
-        f"Tutorial: {tutorial_title}",
-        f"Run: {run_id}",
-        f"Workspace: {workspace}",
-    ]
+    console.print()
+    console.print(tutorial_title, style="bold")
+    console.print(f"Run: {run_id}", style="dim")
+    console.print(f"Workspace: {workspace}", style="dim")
     for transcript in transcripts:
         status = "pass" if transcript.passed else "not yet complete"
-        lines.extend(
-            [
-                "",
-                f"Step {transcript.step_index + 1}: {transcript.title} [{status}]",
-                transcript.transcript.rstrip(),
-            ]
+        console.print()
+        console.print(
+            f"Step {transcript.step_index + 1}: {transcript.title}",
+            style="bold",
         )
-    return "\n".join(lines).rstrip() + "\n"
+        console.print(f"Status: {status}", style="dim")
+        console.print(
+            transcript.transcript.rstrip("\n"),
+            highlight=False,
+            markup=False,
+        )
+    console.print()
 @
 
 <<test functions>>=
-def test_format_review_output_groups_transcripts_by_step():
-    output = format_review_output(
+def test_render_review_output_groups_transcripts_by_step():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_review_output(
+        console,
         "Shell Basics",
         "run-1",
         "/tmp/demo",
@@ -182,8 +200,43 @@ def test_format_review_output_groups_transcripts_by_step():
         ),
     )
 
-    assert "Step 1: Inspect the workspace [pass]" in output
-    assert "/tmp/demo" in output
+    output = buffer.getvalue()
+    assert "Step 1: Inspect the workspace" in output
+    assert "Status: pass" in output
+    assert "Workspace: /tmp/demo" in output
+@
+
+<<test functions>>=
+def test_render_review_output_prints_transcript_literally():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_review_output(
+        console,
+        "Shell Basics",
+        "run-1",
+        "/tmp/demo",
+        (
+            StepTranscript(
+                tutorial_id="shell-basics",
+                step_index=0,
+                title="Inspect the workspace",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript="printf '[green]literal[/green]\n'\n",
+                passed=True,
+            ),
+        ),
+    )
+
+    output = buffer.getvalue()
+    assert "[green]literal[/green]" in output
 @
 
 
@@ -703,6 +756,7 @@ def create_app(
         """Review saved transcripts for one tutorial."""
 
         tutorial_runner = runner()
+        console = Console()
         try:
             tutorial, run, transcripts = tutorial_runner.review(
                 tutorial_id,
@@ -713,14 +767,12 @@ def create_app(
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1)
 
-        typer.echo(
-            format_review_output(
-                tutorial.title,
-                run.run_id,
-                run.workspace,
-                transcripts,
-            ),
-            nl=False,
+        render_review_output(
+            console,
+            tutorial.title,
+            run.run_id,
+            run.workspace,
+            transcripts,
         )
 
     return application
@@ -1015,6 +1067,7 @@ def argparse_review_command(
         state_root=state_root,
         shell_runner=shell_runner,
     )
+    console = Console()
     try:
         tutorial, run, transcripts = runner.review(
             args.tutorial_id,
@@ -1025,16 +1078,49 @@ def argparse_review_command(
         print(error)
         return 1
 
-    print(
-        format_review_output(
-            tutorial.title,
-            run.run_id,
-            run.workspace,
-            transcripts,
-        ),
-        end="",
+    render_review_output(
+        console,
+        tutorial.title,
+        run.run_id,
+        run.workspace,
+        transcripts,
     )
     return 0
+@
+
+<<test functions>>=
+def test_argparse_review_command_shows_saved_transcript(tmp_path, capsys):
+    store = StateStore(tmp_path)
+    run = store.start_run("shell-basics")
+    run.transcripts.append(
+        StepTranscript(
+            tutorial_id="shell-basics",
+            step_index=0,
+            title="Inspect the workspace",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd\n/tmp/demo\n",
+            passed=True,
+        )
+    )
+    store.store_run(run)
+
+    exit_code = argparse_review_command(
+        argparse.Namespace(
+            tutorial_id="shell-basics",
+            step=None,
+            run_id=None,
+        ),
+        namespace="tutorial",
+        state_root=tmp_path,
+        shell_runner=run_scripted_shell,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Inspect the workspace" in captured.out
+    assert "Status: pass" in captured.out
 @
 
 <<functions>>=
