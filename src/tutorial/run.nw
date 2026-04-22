@@ -1,0 +1,677 @@
+\chapter{Running Tutorials}
+\label{tutorial-run}
+
+The runner is where the earlier pieces become a usable tool.  It must
+decide whether a command resumes an unfinished tutorial or starts a new
+run, it must validate each step after the shell exits, and it must make
+the saved transcripts easy to review later.
+
+We keep the policy intentionally narrow for v1:
+\begin{description}
+\item[Resume] the latest unfinished run by default.
+\item[Restart] create a fresh run only when the caller asks for it.
+\item[Advance] only when the current step passed validation.
+\end{description}
+
+
+\section{Code overview}
+
+<<[[run.py]]>>=
+"""Tutorial execution and review helpers."""
+
+<<imports>>
+
+<<classes>>
+<<functions>>
+@
+
+<<test [[run.py]]>>=
+"""Tests for the tutorial runner."""
+
+import pytest
+
+from tutorial.model import get_tutorial
+from tutorial.run import *
+from tutorial.shell import ShellResult
+from tutorial.shell import run_scripted_shell
+from tutorial.state import StateStore
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The runner depends on the shell backend through a callable.  That keeps
+the production path interactive while leaving tests free to inject a
+deterministic scripted shell.
+
+<<imports>>=
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from tutorial.model import StepTranscript
+from tutorial.model import Tutorial
+from tutorial.model import TutorialRun
+from tutorial.model import TutorialStep
+from tutorial.model import get_tutorial
+from tutorial.model import get_tutorials
+from tutorial.shell import ShellResult
+from tutorial.shell import run_interactive_shell
+from tutorial.state import ProgressState
+from tutorial.state import StateStore
+from tutorial.state import count_completed_steps
+from tutorial.state import latest_step_transcripts
+@
+
+
+\section{Summarising one run attempt}
+
+The CLI needs more context than just the updated run record.  It needs to
+know whether the command actually launched shells, whether the tutorial
+was already complete, and whether the latest step blocked further
+progress.
+
+<<classes>>=
+@dataclass(frozen=True)
+class RunResult:
+    """Summary of a tutorial execution attempt."""
+
+    tutorial: Tutorial
+    run: TutorialRun
+    progress: ProgressState
+    executed_steps: int
+    restarted: bool = False
+    already_finished: bool = False
+    blocked_step: TutorialStep | None = None
+    blocked_transcript: StepTranscript | None = None
+@
+
+Let's verify that the result can represent a blocked step without losing
+the updated progress summary.
+
+<<test functions>>=
+def test_run_result_can_report_blocked_step():
+    tutorial = get_tutorial("shell-basics")
+    run = TutorialRun(
+        tutorial_id=tutorial.id,
+        run_id="run-1",
+        workspace="/tmp/demo",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    progress = ProgressState(
+        tutorial_id=tutorial.id,
+        total_steps=len(tutorial.steps),
+        completed_steps=0,
+        finished=False,
+        run_id="run-1",
+    )
+
+    result = RunResult(
+        tutorial=tutorial,
+        run=run,
+        progress=progress,
+        executed_steps=1,
+        blocked_step=tutorial.steps[0],
+    )
+
+    assert result.blocked_step.title == "Inspect the workspace"
+@
+
+
+\section{The tutorial runner}
+
+The runner groups the operational methods so the CLI and embedded hosts
+do not have to recreate the resume logic themselves.
+
+<<classes>>=
+class TutorialRunner:
+    """Run tutorials, persist progress, and review transcripts."""
+
+    <<tutorial runner methods>>
+@
+
+
+\subsection{Initialising the runner}
+
+The default shell runner opens an interactive PTY-backed shell, but the
+constructor keeps that dependency injectable so the logic remains easy to
+test.
+
+<<tutorial runner methods>>=
+def __init__(
+    self,
+    store: StateStore,
+    *,
+    shell_runner: Callable[..., ShellResult] = run_interactive_shell,
+):
+    """Initialise a runner with persistent state and a shell backend."""
+
+    self.store = store
+    self.shell_runner = shell_runner
+@
+
+<<test functions>>=
+def test_runner_keeps_store_and_shell_runner(tmp_path):
+    store = StateStore(tmp_path)
+    runner = TutorialRunner(store, shell_runner=run_scripted_shell)
+
+    assert runner.store is store
+    assert runner.shell_runner is run_scripted_shell
+@
+
+
+\subsection{Listing tutorials with progress}
+
+The list command needs the built-in tutorial definitions alongside the
+latest saved progress for each one.
+
+<<tutorial runner methods>>=
+def list_tutorials(self) -> tuple[tuple[Tutorial, ProgressState], ...]:
+    """Return all built-in tutorials paired with saved progress."""
+
+    entries = []
+    for tutorial in get_tutorials():
+        run = self.store.latest_run(tutorial.id)
+        entries.append((tutorial, self.store.progress_for(tutorial, run)))
+    return tuple(entries)
+@
+
+<<test functions>>=
+def test_list_tutorials_returns_progress_entries(tmp_path):
+    runner = TutorialRunner(StateStore(tmp_path))
+
+    tutorial, progress = runner.list_tutorials()[0]
+
+    assert tutorial.id == "shell-basics"
+    assert progress.completed_steps == 0
+@
+
+
+\subsection{Looking up one tutorial's progress}
+
+Embedded hosts sometimes need the progress summary directly without also
+listing every tutorial.
+
+<<tutorial runner methods>>=
+def progress(self, tutorial_id: str) -> ProgressState:
+    """Return the saved progress for ``tutorial_id``."""
+
+    tutorial = get_tutorial(tutorial_id)
+    run = self.store.latest_run(tutorial_id)
+    return self.store.progress_for(tutorial, run)
+@
+
+<<test functions>>=
+def test_progress_reports_zero_for_fresh_tutorial(tmp_path):
+    runner = TutorialRunner(StateStore(tmp_path))
+
+    progress = runner.progress("shell-basics")
+
+    assert progress.total_steps == 3
+    assert progress.completed_steps == 0
+@
+
+
+\subsection{Running or resuming a tutorial}
+
+This method owns the high-level control flow.
+
+It starts by resolving the run to use.  If the latest run is unfinished,
+we resume it.  If the caller asked for [[restart]], we always create a
+new run.  If the tutorial is already finished and [[restart]] is false,
+we report that state without opening another shell.
+
+Then, for each remaining step, we optionally notify the caller,
+delegate to the shell backend, validate the recorded transcript, and
+persist the updated run immediately.  Immediate persistence matters
+because each step is its own shell session: if the process is interrupted
+between steps, the next invocation should still know where to resume.
+
+<<tutorial runner methods>>=
+def run(
+    self,
+    tutorial_id: str,
+    *,
+    restart: bool = False,
+    before_step: Callable[[Tutorial, int, TutorialStep, TutorialRun], None]
+    | None = None,
+) -> RunResult:
+    """Run or resume ``tutorial_id``."""
+
+    tutorial = get_tutorial(tutorial_id)
+    run, restarted, already_finished = self.select_run(tutorial, restart=restart)
+    progress = self.store.progress_for(tutorial, run)
+    if already_finished:
+        return RunResult(
+            tutorial=tutorial,
+            run=run,
+            progress=progress,
+            executed_steps=0,
+            restarted=restarted,
+            already_finished=True,
+        )
+
+    executed_steps = 0
+    blocked_step = None
+    blocked_transcript = None
+    start_index = count_completed_steps(run)
+
+    for step_index in range(start_index, len(tutorial.steps)):
+        step = tutorial.steps[step_index]
+        if before_step is not None:
+            before_step(tutorial, step_index, step, run)
+
+        shell_result = self.shell_runner(workspace=run.workspace)
+        passed = validate_step(step, shell_result.transcript, run.workspace)
+        transcript = build_step_transcript(
+            tutorial_id=tutorial.id,
+            step_index=step_index,
+            step=step,
+            shell_result=shell_result,
+            passed=passed,
+        )
+        run.transcripts.append(transcript)
+        run.updated_at = shell_result.ended_at
+        self.store.store_run(run)
+        progress = self.store.progress_for(tutorial, run)
+        executed_steps += 1
+
+        if not passed:
+            blocked_step = step
+            blocked_transcript = transcript
+            break
+
+    return RunResult(
+        tutorial=tutorial,
+        run=run,
+        progress=progress,
+        executed_steps=executed_steps,
+        restarted=restarted,
+        blocked_step=blocked_step,
+        blocked_transcript=blocked_transcript,
+    )
+@
+
+Let's verify that a scripted run can complete the built-in tutorial end
+to end.
+
+<<test functions>>=
+def test_runner_completes_shell_basics_with_scripted_shell(tmp_path):
+    store = StateStore(tmp_path)
+    commands = iter(
+        [
+            "pwd\nls\n",
+            "printf 'tutorial\\n' > notes.txt\n",
+            "cat notes.txt\n",
+        ]
+    )
+
+    def scripted_runner(*, workspace):
+        return run_scripted_shell(next(commands), workspace=workspace)
+
+    runner = TutorialRunner(store, shell_runner=scripted_runner)
+    result = runner.run("shell-basics")
+
+    assert result.progress.finished is True
+    assert result.executed_steps == 3
+    assert len(store.latest_run("shell-basics").transcripts) == 3
+
+
+def test_runner_resumes_unfinished_run(tmp_path):
+    store = StateStore(tmp_path)
+    first_commands = iter(["pwd\n"])
+
+    def first_runner(*, workspace):
+        return run_scripted_shell(next(first_commands), workspace=workspace)
+
+    runner = TutorialRunner(store, shell_runner=first_runner)
+    first_result = runner.run("shell-basics")
+
+    assert first_result.progress.completed_steps == 0
+    previous_run_id = first_result.run.run_id
+
+    second_commands = iter(
+        [
+            "pwd\nls\n",
+            "printf 'tutorial\\n' > notes.txt\n",
+            "cat notes.txt\n",
+        ]
+    )
+
+    def second_runner(*, workspace):
+        return run_scripted_shell(next(second_commands), workspace=workspace)
+
+    resumed = TutorialRunner(store, shell_runner=second_runner).run("shell-basics")
+
+    assert resumed.run.run_id == previous_run_id
+    assert resumed.progress.finished is True
+
+
+def test_runner_restart_creates_new_run(tmp_path):
+    store = StateStore(tmp_path)
+    commands = iter(["pwd\n"])
+
+    def first_runner(*, workspace):
+        return run_scripted_shell(next(commands), workspace=workspace)
+
+    first = TutorialRunner(store, shell_runner=first_runner).run("shell-basics")
+
+    restart_commands = iter(["pwd\n"])
+
+    def restart_runner(*, workspace):
+        return run_scripted_shell(next(restart_commands), workspace=workspace)
+
+    restarted = TutorialRunner(store, shell_runner=restart_runner).run(
+        "shell-basics",
+        restart=True,
+    )
+
+    assert restarted.restarted is True
+    assert restarted.run.run_id != first.run.run_id
+@
+
+
+\subsection{Selecting which run to use}
+
+Separating this policy into its own method keeps the main run loop about
+step execution rather than resume bookkeeping.
+
+<<tutorial runner methods>>=
+def select_run(
+    self,
+    tutorial: Tutorial,
+    *,
+    restart: bool = False,
+) -> tuple[TutorialRun, bool, bool]:
+    """Return ``(run, restarted, already_finished)`` for ``tutorial``."""
+
+    latest = self.store.latest_run(tutorial.id)
+    if latest is None:
+        return self.store.start_run(tutorial.id), False, False
+
+    progress = self.store.progress_for(tutorial, latest)
+    if restart:
+        return self.store.start_run(tutorial.id), True, False
+
+    if progress.finished:
+        return latest, False, True
+
+    return latest, False, False
+@
+
+<<test functions>>=
+def test_select_run_reuses_latest_incomplete_run(tmp_path):
+    store = StateStore(tmp_path)
+    tutorial = get_tutorial("shell-basics")
+    run = store.start_run(tutorial.id)
+    runner = TutorialRunner(store)
+
+    selected, restarted, already_finished = runner.select_run(tutorial)
+
+    assert selected.run_id == run.run_id
+    assert restarted is False
+    assert already_finished is False
+@
+
+
+\subsection{Reviewing saved transcripts}
+
+The review command wants the latest attempt for each step by default.
+That means repeated failed attempts do not overwhelm the output, while the
+most recent state of each step remains visible.
+
+<<tutorial runner methods>>=
+def review(
+    self,
+    tutorial_id: str,
+    *,
+    step_number: int | None = None,
+    run_id: str | None = None,
+) -> tuple[Tutorial, TutorialRun, tuple[StepTranscript, ...]]:
+    """Return saved transcripts for review."""
+
+    tutorial = get_tutorial(tutorial_id)
+    run = self.get_run(tutorial_id, run_id=run_id)
+    transcripts = latest_step_transcripts(run)
+    if step_number is not None:
+        step_index = step_number - 1
+        transcripts = tuple(
+            transcript
+            for transcript in transcripts
+            if transcript.step_index == step_index
+        )
+        if not transcripts:
+            raise IndexError(
+                f"No transcript recorded for step {step_number}."
+            )
+    return tutorial, run, transcripts
+@
+
+<<test functions>>=
+def test_review_returns_latest_attempt_for_each_step(tmp_path):
+    store = StateStore(tmp_path)
+    run = store.start_run("shell-basics")
+    run.transcripts.extend(
+        [
+            StepTranscript(
+                tutorial_id="shell-basics",
+                step_index=0,
+                title="Inspect the workspace",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=1,
+                transcript="pwd",
+                passed=False,
+            ),
+            StepTranscript(
+                tutorial_id="shell-basics",
+                step_index=0,
+                title="Inspect the workspace",
+                started_at="2026-01-01T00:00:01+00:00",
+                ended_at="2026-01-01T00:00:02+00:00",
+                exit_status=0,
+                transcript="pwd\nls",
+                passed=True,
+            ),
+        ]
+    )
+    store.store_run(run)
+
+    tutorial, reviewed_run, transcripts = TutorialRunner(store).review(
+        "shell-basics"
+    )
+
+    assert tutorial.id == "shell-basics"
+    assert reviewed_run.run_id == run.run_id
+    assert len(transcripts) == 1
+    assert transcripts[0].passed is True
+@
+
+
+\subsection{Finding the run to review}
+
+Most review requests target the latest run, but a specific run ID should
+still be retrievable when the host application wants that level of
+control.
+
+<<tutorial runner methods>>=
+def get_run(
+    self,
+    tutorial_id: str,
+    *,
+    run_id: str | None = None,
+) -> TutorialRun:
+    """Return the latest or requested run for ``tutorial_id``."""
+
+    if run_id is None:
+        run = self.store.latest_run(tutorial_id)
+        if run is None:
+            raise KeyError(f"No saved run for tutorial {tutorial_id!r}.")
+        return run
+
+    for run in self.store.load_runs(tutorial_id):
+        if run.run_id == run_id:
+            return run
+
+    raise KeyError(
+        f"No saved run {run_id!r} for tutorial {tutorial_id!r}."
+    )
+@
+
+<<test functions>>=
+def test_get_run_rejects_missing_tutorial_history(tmp_path):
+    runner = TutorialRunner(StateStore(tmp_path))
+
+    with pytest.raises(KeyError, match="No saved run"):
+        runner.get_run("shell-basics")
+@
+
+
+\section{Turning shell output into a transcript record}
+
+The runner stores shell sessions as step transcripts so the state layer
+can persist them without knowing anything about validation policy.
+
+<<functions>>=
+def build_step_transcript(
+    *,
+    tutorial_id: str,
+    step_index: int,
+    step: TutorialStep,
+    shell_result: ShellResult,
+    passed: bool,
+) -> StepTranscript:
+    """Convert a shell result into a persisted step transcript."""
+
+    return StepTranscript(
+        tutorial_id=tutorial_id,
+        step_index=step_index,
+        title=step.title,
+        started_at=shell_result.started_at,
+        ended_at=shell_result.ended_at,
+        exit_status=shell_result.exit_status,
+        transcript=shell_result.transcript,
+        passed=passed,
+    )
+@
+
+<<test functions>>=
+def test_build_step_transcript_keeps_title_and_status():
+    step = get_tutorial("shell-basics").steps[0]
+    transcript = build_step_transcript(
+        tutorial_id="shell-basics",
+        step_index=0,
+        step=step,
+        shell_result=ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd",
+        ),
+        passed=True,
+    )
+
+    assert transcript.title == step.title
+    assert transcript.passed is True
+@
+
+
+\section{Validating one step}
+
+Validation combines transcript-based checks and shell-state checks.
+Neither mechanism is enough on its own for the first release, but the two
+small checks together cover the common tutorial patterns well.
+
+<<functions>>=
+def validate_step(
+    step: TutorialStep,
+    transcript: str,
+    workspace: str | Path,
+) -> bool:
+    """Return whether ``step`` passed in ``workspace``."""
+
+    patterns_ok = transcript_matches_patterns(transcript, step.required_patterns)
+    command_ok = check_command_passes(step.check_command, workspace)
+    return patterns_ok and command_ok
+@
+
+<<test functions>>=
+def test_validate_step_requires_both_transcript_and_file_state(tmp_path):
+    step = TutorialStep(
+        title="Create note",
+        instructions="Do it.",
+        required_patterns=("cat notes.txt",),
+        check_command="test -f notes.txt",
+    )
+    (tmp_path / "notes.txt").write_text("tutorial\n")
+
+    assert validate_step(step, "cat notes.txt\ntutorial\n", tmp_path) is True
+    assert validate_step(step, "pwd\n", tmp_path) is False
+@
+
+
+\section{Checking transcript patterns}
+
+Transcript checks are intentionally literal.  The goal is not to parse a
+shell language but to recognise that the expected command or output
+appeared in the recorded session.
+
+<<functions>>=
+def transcript_matches_patterns(
+    transcript: str,
+    patterns: tuple[str, ...],
+) -> bool:
+    """Return whether all required transcript patterns are present."""
+
+    return all(pattern in transcript for pattern in patterns)
+@
+
+<<test functions>>=
+def test_transcript_matches_patterns_accepts_empty_requirements():
+    assert transcript_matches_patterns("pwd\n", ()) is True
+
+
+def test_transcript_matches_patterns_requires_all_patterns():
+    assert transcript_matches_patterns("pwd\nls\n", ("pwd", "ls")) is True
+    assert transcript_matches_patterns("pwd\n", ("pwd", "ls")) is False
+@
+
+
+\section{Checking workspace state}
+
+Some steps are only meaningful if the expected files exist afterwards.
+Running a small shell command keeps those checks close to the actual task
+the student performed.
+
+<<functions>>=
+def check_command_passes(
+    command: str | None,
+    workspace: str | Path,
+) -> bool:
+    """Return whether ``command`` succeeds in ``workspace``."""
+
+    if command is None:
+        return True
+
+    completed = subprocess.run(
+        ["/bin/bash", "-lc", command],
+        cwd=Path(workspace),
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+@
+
+<<test functions>>=
+def test_check_command_passes_uses_workspace_files(tmp_path):
+    (tmp_path / "notes.txt").write_text("tutorial\n")
+
+    assert check_command_passes("grep -q tutorial notes.txt", tmp_path) is True
+    assert check_command_passes("grep -q missing notes.txt", tmp_path) is False
+@

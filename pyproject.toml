@@ -1,0 +1,56 @@
+[project]
+name = "tutorial"
+version = "0.1.0"
+description = "Interactive command-line tutorials with PTY-backed steps"
+license = "MIT"
+readme = "README.md"
+authors = [
+  {name = "Daniel Bosk", email = "daniel@bosk.se"}
+]
+maintainers = [
+  {name = "Daniel Bosk", email = "dbosk@kth.se"}
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Intended Audience :: Education",
+  "Topic :: Education"
+]
+requires-python = ">=3.10"
+dependencies = [
+  "platformdirs>=4",
+  "typer>=0.9.0"
+]
+
+[project.scripts]
+tutorial = "tutorial.cli:app"
+
+[project.urls]
+repository = "https://github.com/dbosk/tutorial"
+"Bug Tracker" = "https://github.com/dbosk/tutorial/issues"
+
+[tool.poetry]
+packages = [{include = "tutorial", from = "src"}]
+include = [
+  {path = "src/**/*.py", format = "wheel"},
+]
+exclude = [
+  "src/tutorial/.gitignore",
+  "src/tutorial/Makefile",
+  "src/tutorial/*.nw",
+  "src/tutorial/*.tex",
+  "src/tutorial/ltxobj",
+]
+
+[tool.black]
+target-version = ["py310"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+  "pytest>=7.4"
+]

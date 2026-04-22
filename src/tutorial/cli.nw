@@ -1,0 +1,675 @@
+\chapter{Command-Line Interface}
+\label{tutorial-cli}
+
+The command-line interface has two jobs.  It must expose the standalone
+[[tutorial]] command, and it must make that same functionality available
+to other CLIs that want tutorials as a subcommand.
+
+Typer is the primary interface because it keeps the standalone command
+compact and gives structured help text with little boilerplate.
+Argparse support is still important, though, because some host CLIs are
+already built around it.  The implementation therefore shares one runner
+layer and only varies the argument plumbing.
+
+
+\section{Code overview}
+
+<<[[cli.py]]>>=
+"""Command-line interface and embedding helpers for ``tutorial``."""
+
+<<imports>>
+
+<<functions>>
+
+app = create_app()
+@
+
+<<test [[cli.py]]>>=
+"""Tests for the CLI helpers."""
+
+import argparse
+
+from typer.testing import CliRunner
+
+from tutorial.cli import *
+from tutorial.model import StepTranscript
+from tutorial.state import StateStore
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The CLI layer stays intentionally thin.  Formatting helpers live here,
+while tutorial state changes stay inside the runner.
+
+<<imports>>=
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Annotated
+from typing import Callable
+
+import typer
+
+from tutorial.run import RunResult
+from tutorial.run import TutorialRunner
+from tutorial.shell import run_interactive_shell
+from tutorial.state import ProgressState
+from tutorial.state import StateStore
+@
+
+
+\section{Building a runner for one host namespace}
+
+Both the standalone command and embedded hosts need the same namespace
+and state-root configuration, so we centralise runner creation in one
+helper.
+
+<<functions>>=
+def build_runner(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    shell_runner: Callable[..., object] = run_interactive_shell,
+) -> TutorialRunner:
+    """Build a tutorial runner for one CLI host namespace."""
+
+    return TutorialRunner(
+        StateStore(state_root, namespace=namespace),
+        shell_runner=shell_runner,
+    )
+@
+
+<<test functions>>=
+def test_build_runner_uses_requested_namespace(tmp_path):
+    runner = build_runner(namespace="host-app", state_root=tmp_path)
+
+    assert runner.store.namespace == "host-app"
+@
+
+
+\section{Formatting progress lines}
+
+The list command should be scannable.  One line per tutorial is enough if
+we include both the tutorial ID and its current progress summary.
+
+<<functions>>=
+def format_progress_line(title: str, progress: ProgressState, summary: str) -> str:
+    """Return one display line for the list command."""
+
+    status = (
+        "completed"
+        if progress.finished
+        else f"{progress.completed_steps}/{progress.total_steps} complete"
+    )
+    return f"{title}: {status} - {summary}"
+@
+
+<<test functions>>=
+def test_format_progress_line_includes_status_and_summary():
+    line = format_progress_line(
+        "shell-basics",
+        ProgressState(
+            tutorial_id="shell-basics",
+            total_steps=3,
+            completed_steps=1,
+            finished=False,
+        ),
+        "A short summary.",
+    )
+
+    assert "1/3 complete" in line
+    assert "A short summary." in line
+@
+
+
+\section{Formatting the review output}
+
+Review is small by design, but it still needs enough structure that a
+student can distinguish one step's transcript from the next.
+
+<<functions>>=
+def format_review_output(
+    tutorial_title: str,
+    run_id: str,
+    workspace: str,
+    transcripts: tuple[StepTranscript, ...],
+) -> str:
+    """Return formatted review text for saved transcripts."""
+
+    lines = [
+        f"Tutorial: {tutorial_title}",
+        f"Run: {run_id}",
+        f"Workspace: {workspace}",
+    ]
+    for transcript in transcripts:
+        status = "pass" if transcript.passed else "not yet complete"
+        lines.extend(
+            [
+                "",
+                f"Step {transcript.step_index + 1}: {transcript.title} [{status}]",
+                transcript.transcript.rstrip(),
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+@
+
+<<test functions>>=
+def test_format_review_output_groups_transcripts_by_step():
+    output = format_review_output(
+        "Shell Basics",
+        "run-1",
+        "/tmp/demo",
+        (
+            StepTranscript(
+                tutorial_id="shell-basics",
+                step_index=0,
+                title="Inspect the workspace",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript="pwd\n/tmp/demo\n",
+                passed=True,
+            ),
+        ),
+    )
+
+    assert "Step 1: Inspect the workspace [pass]" in output
+    assert "/tmp/demo" in output
+@
+
+
+\section{Formatting step prompts}
+
+Each step opens a fresh shell, so the CLI must print the instructions
+before the shell starts.  The text also reminds the student that leaving
+the shell returns control to the tutorial runner.
+
+<<functions>>=
+def format_step_prompt(
+    tutorial_title: str,
+    step_number: int,
+    total_steps: int,
+    step_title: str,
+    instructions: str,
+    workspace: str,
+) -> str:
+    """Return the prompt shown before one interactive step."""
+
+    return (
+        f"{tutorial_title}\n"
+        f"Step {step_number}/{total_steps}: {step_title}\n"
+        f"Workspace: {workspace}\n"
+        f"{instructions}\n"
+        "Exit the shell when you want the tutorial to validate the step."
+    )
+@
+
+<<test functions>>=
+def test_format_step_prompt_mentions_workspace_and_exit():
+    prompt = format_step_prompt(
+        "Shell Basics",
+        1,
+        3,
+        "Inspect the workspace",
+        "Run pwd and ls.",
+        "/tmp/demo",
+    )
+
+    assert "Step 1/3" in prompt
+    assert "Exit the shell" in prompt
+@
+
+
+\section{Building the Typer application}
+
+The standalone CLI and Typer embedding both rely on the same factory.
+Using a factory rather than a single global app keeps the namespace and
+state-root configuration overridable for tests and host applications.
+
+<<functions>>=
+def create_app(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    shell_runner: Callable[..., object] = run_interactive_shell,
+) -> typer.Typer:
+    """Create a Typer application for tutorials."""
+
+    application = typer.Typer(help="Run interactive command-line tutorials.")
+
+    def runner() -> TutorialRunner:
+        return build_runner(
+            namespace=namespace,
+            state_root=state_root,
+            shell_runner=shell_runner,
+        )
+
+    @application.command("list")
+    def list_command() -> None:
+        """List the built-in tutorials and their saved progress."""
+
+        for tutorial, progress in runner().list_tutorials():
+            typer.echo(
+                format_progress_line(tutorial.id, progress, tutorial.summary)
+            )
+
+    @application.command("run")
+    def run_command(
+        tutorial_id: str,
+        restart: Annotated[
+            bool,
+            typer.Option(
+                "--restart",
+                help="Start a fresh run instead of resuming saved progress.",
+            ),
+        ] = False,
+    ) -> None:
+        """Run or resume one tutorial."""
+
+        tutorial_runner = runner()
+
+        def before_step(tutorial, step_index, step, run) -> None:
+            typer.echo(
+                format_step_prompt(
+                    tutorial.title,
+                    step_index + 1,
+                    len(tutorial.steps),
+                    step.title,
+                    step.instructions,
+                    run.workspace,
+                )
+            )
+
+        try:
+            result = tutorial_runner.run(
+                tutorial_id,
+                restart=restart,
+                before_step=before_step,
+            )
+        except KeyError as error:
+            raise typer.BadParameter(str(error), param_hint="tutorial_id")
+        except RuntimeError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+
+        emit_run_summary(result)
+
+    @application.command("review")
+    def review_command(
+        tutorial_id: str,
+        step: Annotated[
+            int | None,
+            typer.Option(
+                "--step",
+                min=1,
+                help="Review only the latest transcript for one step.",
+            ),
+        ] = None,
+        run_id: Annotated[
+            str | None,
+            typer.Option(
+                "--run-id",
+                help="Review a specific saved run instead of the latest one.",
+            ),
+        ] = None,
+    ) -> None:
+        """Review saved transcripts for one tutorial."""
+
+        tutorial_runner = runner()
+        try:
+            tutorial, run, transcripts = tutorial_runner.review(
+                tutorial_id,
+                step_number=step,
+                run_id=run_id,
+            )
+        except (KeyError, IndexError) as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+
+        typer.echo(
+            format_review_output(
+                tutorial.title,
+                run.run_id,
+                run.workspace,
+                transcripts,
+            ),
+            nl=False,
+        )
+
+    return application
+@
+
+Let's verify that the generated application exposes the built-in tutorial
+through the list and review commands.
+
+<<test functions>>=
+def test_list_command_shows_shell_basics(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(create_app(state_root=tmp_path), ["list"])
+
+    assert result.exit_code == 0
+    assert "shell-basics" in result.stdout
+
+
+def test_review_command_shows_saved_transcript(tmp_path):
+    store = StateStore(tmp_path)
+    run = store.start_run("shell-basics")
+    run.transcripts.append(
+        StepTranscript(
+            tutorial_id="shell-basics",
+            step_index=0,
+            title="Inspect the workspace",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd\n/tmp/demo\n",
+            passed=True,
+        )
+    )
+    store.store_run(run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_app(state_root=tmp_path),
+        ["review", "shell-basics"],
+    )
+
+    assert result.exit_code == 0
+    assert "Inspect the workspace" in result.stdout
+@
+
+
+\section{Summarising a run for the terminal}
+
+The CLI should give concise feedback after the runner returns.  We keep
+that logic separate from the command function so the argparse wrapper can
+reuse it.
+
+<<functions>>=
+def emit_run_summary(result: RunResult) -> None:
+    """Print a concise summary for a completed run command."""
+
+    if result.already_finished:
+        typer.echo(
+            "Tutorial already completed. Use --restart to begin a fresh run."
+        )
+        return
+
+    if result.blocked_step is not None:
+        typer.echo(
+            f"Step not complete yet: {result.blocked_step.title}",
+            err=True,
+        )
+        if result.blocked_step.hint:
+            typer.echo(f"Hint: {result.blocked_step.hint}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Completed {result.tutorial.id}. Review it with "
+        f"`tutorial review {result.tutorial.id}`."
+    )
+@
+
+<<test functions>>=
+def test_emit_run_summary_reports_completed_tutorial(capsys, tmp_path):
+    tutorial = build_runner(state_root=tmp_path).list_tutorials()[0][0]
+    result = RunResult(
+        tutorial=tutorial,
+        run=StateStore(tmp_path).start_run(tutorial.id),
+        progress=ProgressState(
+            tutorial_id=tutorial.id,
+            total_steps=3,
+            completed_steps=3,
+            finished=True,
+        ),
+        executed_steps=3,
+    )
+
+    emit_run_summary(result)
+
+    captured = capsys.readouterr()
+    assert "Completed shell-basics" in captured.out
+@
+
+
+\section{Embedding in another Typer application}
+
+Typer already has a clean composition API, so the helper only needs to
+build a configured sub-application and register it under the requested
+name.
+
+<<functions>>=
+def add_typer_subcommand(
+    parent_app: typer.Typer,
+    *,
+    name: str = "tutorial",
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    shell_runner: Callable[..., object] = run_interactive_shell,
+) -> typer.Typer:
+    """Attach the tutorial CLI as a Typer subcommand."""
+
+    child_app = create_app(
+        namespace=namespace,
+        state_root=state_root,
+        shell_runner=shell_runner,
+    )
+    parent_app.add_typer(child_app, name=name)
+    return child_app
+@
+
+<<test functions>>=
+def test_add_typer_subcommand_registers_tutorial_namespace(tmp_path):
+    parent = typer.Typer()
+    add_typer_subcommand(parent, state_root=tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial", "list"])
+
+    assert result.exit_code == 0
+    assert "shell-basics" in result.stdout
+@
+
+
+\section{Embedding in an argparse application}
+
+Argparse composition needs a little more plumbing because there is no
+native equivalent of Typer's sub-app mounting.  We therefore create the
+subparser tree and store a callable on each leaf parser.
+
+<<functions>>=
+def add_argparse_subcommand(
+    subparsers: argparse._SubParsersAction,
+    *,
+    name: str = "tutorial",
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    shell_runner: Callable[..., object] = run_interactive_shell,
+) -> argparse.ArgumentParser:
+    """Attach the tutorial CLI as an argparse subcommand tree."""
+
+    parser = subparsers.add_parser(name, help="Run interactive tutorials")
+    tutorial_subparsers = parser.add_subparsers(dest="tutorial_command")
+    tutorial_subparsers.required = True
+
+    list_parser = tutorial_subparsers.add_parser("list", help="List tutorials")
+    list_parser.set_defaults(
+        tutorial_handler=lambda args: argparse_list_command(
+            namespace=namespace,
+            state_root=state_root,
+            shell_runner=shell_runner,
+        )
+    )
+
+    review_parser = tutorial_subparsers.add_parser(
+        "review",
+        help="Review saved transcripts",
+    )
+    review_parser.add_argument("tutorial_id")
+    review_parser.add_argument("--step", type=int)
+    review_parser.add_argument("--run-id")
+    review_parser.set_defaults(
+        tutorial_handler=lambda args: argparse_review_command(
+            args,
+            namespace=namespace,
+            state_root=state_root,
+            shell_runner=shell_runner,
+        )
+    )
+
+    run_parser = tutorial_subparsers.add_parser("run", help="Run a tutorial")
+    run_parser.add_argument("tutorial_id")
+    run_parser.add_argument("--restart", action="store_true")
+    run_parser.set_defaults(
+        tutorial_handler=lambda args: argparse_run_command(
+            args,
+            namespace=namespace,
+            state_root=state_root,
+            shell_runner=shell_runner,
+        )
+    )
+    return parser
+@
+
+<<test functions>>=
+def test_add_argparse_subcommand_creates_dispatchable_handler(tmp_path, capsys):
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+    add_argparse_subcommand(subparsers, state_root=tmp_path)
+
+    args = parser.parse_args(["tutorial", "list"])
+    exit_code = run_argparse_command(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "shell-basics" in captured.out
+@
+
+
+\section{Dispatching argparse handlers}
+
+The host application only needs one post-parse hook: if the namespace
+contains a tutorial handler, call it and use the returned status code.
+
+<<functions>>=
+def run_argparse_command(args: argparse.Namespace) -> int:
+    """Dispatch a parsed argparse tutorial command."""
+
+    handler = getattr(args, "tutorial_handler", None)
+    if handler is None:
+        raise ValueError("No tutorial handler found on parsed arguments.")
+    return handler(args)
+@
+
+
+\section{Implementing the argparse leaf commands}
+
+Each leaf command delegates to the same runner layer as Typer.  The only
+difference is that argparse commands return integer exit codes instead of
+raising [[typer.Exit]].
+
+<<functions>>=
+def argparse_list_command(
+    *,
+    namespace: str,
+    state_root: str | Path | None,
+    shell_runner: Callable[..., object],
+) -> int:
+    """Implement the argparse ``list`` subcommand."""
+
+    runner = build_runner(
+        namespace=namespace,
+        state_root=state_root,
+        shell_runner=shell_runner,
+    )
+    for tutorial, progress in runner.list_tutorials():
+        print(format_progress_line(tutorial.id, progress, tutorial.summary))
+    return 0
+@
+
+<<functions>>=
+def argparse_review_command(
+    args: argparse.Namespace,
+    *,
+    namespace: str,
+    state_root: str | Path | None,
+    shell_runner: Callable[..., object],
+) -> int:
+    """Implement the argparse ``review`` subcommand."""
+
+    runner = build_runner(
+        namespace=namespace,
+        state_root=state_root,
+        shell_runner=shell_runner,
+    )
+    try:
+        tutorial, run, transcripts = runner.review(
+            args.tutorial_id,
+            step_number=args.step,
+            run_id=args.run_id,
+        )
+    except (KeyError, IndexError) as error:
+        print(error)
+        return 1
+
+    print(
+        format_review_output(
+            tutorial.title,
+            run.run_id,
+            run.workspace,
+            transcripts,
+        ),
+        end="",
+    )
+    return 0
+@
+
+<<functions>>=
+def argparse_run_command(
+    args: argparse.Namespace,
+    *,
+    namespace: str,
+    state_root: str | Path | None,
+    shell_runner: Callable[..., object],
+) -> int:
+    """Implement the argparse ``run`` subcommand."""
+
+    tutorial_runner = build_runner(
+        namespace=namespace,
+        state_root=state_root,
+        shell_runner=shell_runner,
+    )
+
+    def before_step(tutorial, step_index, step, run) -> None:
+        print(
+            format_step_prompt(
+                tutorial.title,
+                step_index + 1,
+                len(tutorial.steps),
+                step.title,
+                step.instructions,
+                run.workspace,
+            )
+        )
+
+    try:
+        result = tutorial_runner.run(
+            args.tutorial_id,
+            restart=args.restart,
+            before_step=before_step,
+        )
+    except (KeyError, RuntimeError) as error:
+        print(error)
+        return 1
+
+    try:
+        emit_run_summary(result)
+    except typer.Exit as error:
+        return error.exit_code
+    return 0
+@

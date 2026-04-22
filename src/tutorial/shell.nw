@@ -1,0 +1,303 @@
+\chapter{PTY Shell Sessions}
+\label{tutorial-shell}
+
+The central interaction problem is not menu rendering but shell control.
+Students need a real shell so they can type normal commands, create
+files, and inspect the workspace as they would in ordinary terminal use.
+
+We therefore use a PTY-backed bash shell.  The PTY gives us two things a
+plain subprocess does not: an interactive shell prompt and a transcript
+that reflects what actually appeared in the terminal.
+
+
+\section{Code overview}
+
+<<[[shell.py]]>>=
+"""PTY-backed shell sessions for tutorial steps."""
+
+<<imports>>
+
+<<classes>>
+<<functions>>
+@
+
+<<test [[shell.py]]>>=
+"""Tests for shell session helpers."""
+
+from pathlib import Path
+
+from tutorial.shell import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The shell backend stays in the standard library.  That keeps the first
+release easy to install and focuses the implementation effort on the PTY
+behaviour itself rather than on a higher-level UI framework.
+
+<<imports>>=
+from __future__ import annotations
+
+import os
+import pty
+import select
+import subprocess
+import sys
+import termios
+import tty
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+@
+
+
+\section{Capturing the result of one shell session}
+
+The runner only needs four facts from a completed session: when it
+started, when it ended, the shell's exit status, and the captured
+transcript.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ShellResult:
+    """Captured result of one shell session."""
+
+    started_at: str
+    ended_at: str
+    exit_status: int
+    transcript: str
+@
+
+Let's verify that the result object keeps the captured transcript text.
+
+<<test functions>>=
+def test_shell_result_stores_transcript_text():
+    result = ShellResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="pwd\r\n",
+    )
+
+    assert "pwd" in result.transcript
+@
+
+
+\section{Creating shell timestamps}
+
+The shell module keeps its own UTC helper so it can be used without
+depending on the state layer.
+
+<<functions>>=
+def utc_now() -> str:
+    """Return the current time as an ISO 8601 UTC string."""
+
+    return datetime.now(timezone.utc).isoformat()
+@
+
+
+\section{Preparing the shell environment}
+
+We keep the prompt explicit so the transcript reads like a shell session
+when shown in the review command.  Resetting [[PROMPT_COMMAND]] avoids
+host-specific shell hooks from polluting the transcript.
+
+<<functions>>=
+def build_shell_environment(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the environment used for tutorial shell sessions."""
+
+    env = dict(os.environ)
+    env["PS1"] = "tutorial$ "
+    env["PROMPT_COMMAND"] = ""
+    env["TERM"] = env.get("TERM", "xterm-256color")
+    if extra_env:
+        env.update(extra_env)
+    return env
+@
+
+<<test functions>>=
+def test_build_shell_environment_sets_prompt():
+    env = build_shell_environment({"EXTRA": "yes"})
+
+    assert env["PS1"] == "tutorial$ "
+    assert env["EXTRA"] == "yes"
+@
+
+
+\section{Reading all output from a PTY}
+
+Both the scripted and interactive variants need the same drain logic:
+keep reading from the PTY until the shell exits and no more output is
+available.
+
+<<functions>>=
+def read_transcript(master_fd: int, process: subprocess.Popen) -> str:
+    """Drain PTY output until ``process`` exits."""
+
+    chunks = bytearray()
+    while True:
+        readable, _, _ = select.select([master_fd], [], [], 0.05)
+        if master_fd in readable:
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                data = b""
+
+            if data:
+                chunks.extend(data)
+                continue
+
+        if process.poll() is not None:
+            break
+
+    return chunks.decode("utf-8", errors="replace")
+@
+
+
+\section{Running scripted shell sessions}
+
+Tests should exercise the PTY path too, but they should not depend on a
+real terminal.  The scripted helper therefore writes a predefined command
+sequence to the PTY and then exits the shell automatically.
+
+<<functions>>=
+def run_scripted_shell(
+    commands: str,
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    env: dict[str, str] | None = None,
+) -> ShellResult:
+    """Run ``commands`` in a PTY-backed shell and capture the transcript."""
+
+    started_at = utc_now()
+    workspace_path = Path(workspace)
+    master_fd, slave_fd = pty.openpty()
+    process = subprocess.Popen(
+        [shell, "--noprofile", "--norc", "-i"],
+        cwd=workspace_path,
+        env=build_shell_environment(env),
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    command_text = commands
+    if not command_text.endswith("\n"):
+        command_text += "\n"
+    os.write(master_fd, (command_text + "exit\n").encode("utf-8"))
+    transcript = read_transcript(master_fd, process)
+    os.close(master_fd)
+    exit_status = process.wait()
+    ended_at = utc_now()
+
+    return ShellResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=exit_status,
+        transcript=transcript,
+    )
+@
+
+Let's verify that scripted sessions both execute commands and write files
+into the chosen workspace.
+
+<<test functions>>=
+def test_run_scripted_shell_captures_output(tmp_path):
+    result = run_scripted_shell(
+        "printf 'hello\\n'",
+        workspace=tmp_path,
+    )
+
+    assert result.exit_status == 0
+    assert "hello" in result.transcript
+
+
+def test_run_scripted_shell_uses_workspace(tmp_path):
+    run_scripted_shell(
+        "printf 'tutorial\\n' > notes.txt",
+        workspace=tmp_path,
+    )
+
+    assert (tmp_path / "notes.txt").read_text() == "tutorial\n"
+@
+
+
+\section{Running interactive shell sessions}
+
+The interactive variant forwards bytes between the PTY and the user's
+terminal.  We temporarily switch stdin to raw mode so control characters
+and line editing behave as they do in a normal shell session.
+
+<<functions>>=
+def run_interactive_shell(
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    env: dict[str, str] | None = None,
+) -> ShellResult:
+    """Open an interactive PTY-backed shell in ``workspace``."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("Interactive tutorial shells require a TTY.")
+
+    started_at = utc_now()
+    workspace_path = Path(workspace)
+    master_fd, slave_fd = pty.openpty()
+    process = subprocess.Popen(
+        [shell, "--noprofile", "--norc", "-i"],
+        cwd=workspace_path,
+        env=build_shell_environment(env),
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    transcript = bytearray()
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    original_mode = termios.tcgetattr(stdin_fd)
+
+    try:
+        tty.setraw(stdin_fd)
+        while True:
+            readable, _, _ = select.select([master_fd, stdin_fd], [], [], 0.05)
+
+            if master_fd in readable:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    data = b""
+
+                if data:
+                    transcript.extend(data)
+                    os.write(stdout_fd, data)
+
+            if stdin_fd in readable:
+                data = os.read(stdin_fd, 4096)
+                if data:
+                    os.write(master_fd, data)
+
+            if process.poll() is not None and not readable:
+                break
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
+
+    os.close(master_fd)
+    exit_status = process.wait()
+    ended_at = utc_now()
+    return ShellResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=exit_status,
+        transcript=transcript.decode("utf-8", errors="replace"),
+    )
+@

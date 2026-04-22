@@ -1,0 +1,305 @@
+\chapter{Tutorial Model}
+\label{tutorial-model}
+
+The model layer answers two questions.  First, what information do we
+need to describe a tutorial step?  Second, what information do we need
+to preserve after the student has interacted with the shell?
+
+We keep the answer deliberately small.  A step has human-facing text
+and one or two machine-checkable expectations; a run stores the
+transcripts that were produced while the student worked through the
+tutorial.
+
+
+\section{Code overview}
+
+<<[[model.py]]>>=
+"""Tutorial models and built-in tutorial definitions."""
+
+<<imports>>
+
+<<classes>>
+<<constants>>
+<<functions>>
+@
+
+<<test [[model.py]]>>=
+"""Tests for the tutorial model."""
+
+import pytest
+
+from tutorial.model import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The model uses plain dataclasses so that the runtime can serialise them
+without a custom encoding layer.
+
+<<imports>>=
+from __future__ import annotations
+
+from dataclasses import dataclass
+from dataclasses import field
+@
+
+
+\section{Describing tutorial steps}
+
+Each step needs enough information for two different readers.
+The student needs a title and instructions, while the runner needs a
+small, explicit check that tells it whether the student can move on.
+
+We support two complementary checks:
+\begin{description}
+\item[Transcript patterns] small strings that should appear in the saved
+  transcript when the student uses the intended command.
+\item[Shell checks] a shell command that must succeed in the step
+  workspace.
+\end{description}
+
+The combination stays simple but covers the first release well.  Some
+steps are best recognised from what the student typed, while others are
+best recognised from the files they created.
+
+<<classes>>=
+@dataclass(frozen=True)
+class TutorialStep:
+    """One interactive step in a tutorial."""
+
+    title: str
+    instructions: str
+    required_patterns: tuple[str, ...] = ()
+    check_command: str | None = None
+    hint: str | None = None
+@
+
+Let's verify that a step can carry both transcript checks and a shell
+check.
+
+<<test functions>>=
+def test_tutorial_step_keeps_validation_rules():
+    step = TutorialStep(
+        title="Create a file",
+        instructions="Create notes.txt.",
+        required_patterns=("notes.txt",),
+        check_command="test -f notes.txt",
+    )
+
+    assert step.required_patterns == ("notes.txt",)
+    assert step.check_command == "test -f notes.txt"
+@
+
+
+\section{Describing tutorials}
+
+The tutorial object groups steps under a stable identifier.  The stable
+identifier matters because progress is stored on disk, and the CLI needs
+an ID that remains valid even if the prose title is revised later.
+
+<<classes>>=
+@dataclass(frozen=True)
+class Tutorial:
+    """A built-in tutorial definition."""
+
+    id: str
+    title: str
+    summary: str
+    steps: tuple[TutorialStep, ...]
+@
+
+<<test functions>>=
+def test_tutorial_groups_steps_under_stable_id():
+    tutorial = Tutorial(
+        id="demo",
+        title="Demo",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+    )
+
+    assert tutorial.id == "demo"
+    assert tutorial.steps[0].title == "One"
+@
+
+
+\section{Recording step transcripts}
+
+Review only works if we keep the output that flowed through the shell,
+and progress tracking is more useful when it records whether the step
+was judged complete.  A transcript therefore captures the shell output,
+the exit status, and a boolean completion flag.
+
+<<classes>>=
+@dataclass
+class StepTranscript:
+    """Recorded transcript for one tutorial step."""
+
+    tutorial_id: str
+    step_index: int
+    title: str
+    started_at: str
+    ended_at: str
+    exit_status: int
+    transcript: str
+    passed: bool = False
+@
+
+<<test functions>>=
+def test_step_transcript_defaults_to_not_passed():
+    transcript = StepTranscript(
+        tutorial_id="demo",
+        step_index=0,
+        title="One",
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="pwd\r\n",
+    )
+
+    assert transcript.passed is False
+@
+
+
+\section{Recording tutorial runs}
+
+Progress and review need a stable run record.  The run ID lets us resume
+an unfinished session, while the workspace path tells later steps where
+their files live.
+
+<<classes>>=
+@dataclass
+class TutorialRun:
+    """Recorded run of a tutorial."""
+
+    tutorial_id: str
+    run_id: str
+    workspace: str
+    started_at: str
+    updated_at: str
+    transcripts: list[StepTranscript] = field(default_factory=list)
+@
+
+<<test functions>>=
+def test_tutorial_run_starts_with_empty_transcript_list():
+    run = TutorialRun(
+        tutorial_id="demo",
+        run_id="run-1",
+        workspace="/tmp/demo",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert run.transcripts == []
+@
+
+
+\section{Built-in tutorials}
+
+The first release only supports built-in tutorials, so the registry can
+be a plain tuple.  That keeps the embedding story simple: a host CLI can
+add the tutorial subcommand without also inheriting package management
+commands for installing external tutorials.
+
+The example tutorial is intentionally small.  It teaches the student how
+the per-step shell works, it produces a file in the dedicated workspace,
+and it creates enough transcript material for the review command to show
+something meaningful afterwards.
+
+<<constants>>=
+BUILTIN_TUTORIALS = (
+    Tutorial(
+        id="shell-basics",
+        title="Shell Basics",
+        summary=(
+            "Inspect the workspace, create a file, and review what you did."
+        ),
+        steps=(
+            TutorialStep(
+                title="Inspect the workspace",
+                instructions=(
+                    "Run `pwd` and `ls` so you can see where this tutorial "
+                    "stores its work."
+                ),
+                required_patterns=("pwd", "ls"),
+                hint="The shell starts in the tutorial workspace.",
+            ),
+            TutorialStep(
+                title="Create a note",
+                instructions=(
+                    "Create `notes.txt` containing the word `tutorial`. "
+                    "For example: `printf 'tutorial\n' > notes.txt`."
+                ),
+                check_command="test -f notes.txt && grep -q tutorial notes.txt",
+                hint="Any command sequence is fine if the file exists afterwards.",
+            ),
+            TutorialStep(
+                title="Review the note",
+                instructions=(
+                    "Display the file with `cat notes.txt` so the transcript "
+                    "shows both the command and its output."
+                ),
+                required_patterns=("cat notes.txt", "tutorial"),
+                check_command="grep -q tutorial notes.txt",
+            ),
+        ),
+    ),
+)
+@
+
+
+\section{Listing tutorials}
+
+The CLI needs an ordered list for display, so we expose the built-in
+registry directly as an immutable tuple.
+
+<<functions>>=
+def get_tutorials() -> tuple[Tutorial, ...]:
+    """Return the built-in tutorials in display order."""
+
+    return BUILTIN_TUTORIALS
+@
+
+Let's verify that the example tutorial is visible to the CLI.
+
+<<test functions>>=
+def test_get_tutorials_returns_shell_basics():
+    tutorials = get_tutorials()
+
+    assert tutorials[0].id == "shell-basics"
+@
+
+
+\section{Looking up one tutorial}
+
+The runner needs a direct lookup helper so the CLI can fail early with a
+useful message when the user asks for an unknown tutorial.
+
+<<functions>>=
+def get_tutorial(tutorial_id: str) -> Tutorial:
+    """Return the built-in tutorial with the given ID."""
+
+    for tutorial in BUILTIN_TUTORIALS:
+        if tutorial.id == tutorial_id:
+            return tutorial
+
+    available = ", ".join(tutorial.id for tutorial in BUILTIN_TUTORIALS)
+    raise KeyError(
+        f"Unknown tutorial {tutorial_id!r}. Available tutorials: {available}"
+    )
+@
+
+<<test functions>>=
+def test_get_tutorial_returns_requested_tutorial():
+    tutorial = get_tutorial("shell-basics")
+
+    assert tutorial.title == "Shell Basics"
+    assert len(tutorial.steps) == 3
+
+
+def test_get_tutorial_rejects_unknown_ids():
+    with pytest.raises(KeyError, match="Available tutorials"):
+        get_tutorial("missing")
+@
