@@ -1219,8 +1219,12 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
         ]
     )
 
-    def scripted_runner(*, workspace):
-        return run_scripted_shell(next(commands), workspace=workspace)
+    def scripted_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     def fake_editor_runner(*, workspace, relative_path, initial_text=None):
         file_path = Path(workspace) / relative_path
@@ -1266,8 +1270,12 @@ def test_run_tutorial_with_menu_can_exit_after_failed_step(tmp_path):
     tutorial_path = write_demo_tutorial(tmp_path)
     commands = iter(["pwd\n"])
 
-    def scripted_runner(*, workspace):
-        return run_scripted_shell(next(commands), workspace=workspace)
+    def scripted_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     tutorial_runner = build_runner(
         state_root=tmp_path / "state",
@@ -1585,8 +1593,12 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
         ]
     )
 
-    def scripted_runner(*, workspace):
-        return run_scripted_shell(next(commands), workspace=workspace)
+    def scripted_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     def fake_editor_runner(*, workspace, relative_path, initial_text=None):
         file_path = Path(workspace) / relative_path

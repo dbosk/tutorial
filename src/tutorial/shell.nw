@@ -139,27 +139,38 @@ def utc_now() -> str:
 \section{Preparing the shell environment}
 
 We keep the prompt explicit so the transcript reads like a shell session
-when shown in the review command.  Resetting [[PROMPT_COMMAND]] avoids
-host-specific shell hooks from polluting the transcript.
+when shown in the review command.  Nested tutorials should also expose
+their own names in the prompt, otherwise the inner shell is hard to tell
+apart from the outer one.
+
+Resetting [[PROMPT_COMMAND]] avoids host-specific shell hooks from
+polluting the transcript.
 
 <<functions>>=
-def build_shell_environment(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+def build_shell_environment(
+    extra_env: dict[str, str] | None = None,
+    *,
+    prompt_name: str = "tutorial",
+) -> dict[str, str]:
     """Return the environment used for tutorial shell sessions."""
 
     env = dict(os.environ)
-    env["PS1"] = "tutorial$ "
-    env["PROMPT_COMMAND"] = ""
-    env["TERM"] = env.get("TERM", "xterm-256color")
     if extra_env:
         env.update(extra_env)
+    env["PS1"] = f"{prompt_name} $ "
+    env["PROMPT_COMMAND"] = ""
+    env["TERM"] = env.get("TERM", "xterm-256color")
     return env
 @
 
 <<test functions>>=
 def test_build_shell_environment_sets_prompt():
-    env = build_shell_environment({"EXTRA": "yes"})
+    env = build_shell_environment(
+        {"EXTRA": "yes"},
+        prompt_name="using-tutorials",
+    )
 
-    assert env["PS1"] == "tutorial$ "
+    assert env["PS1"] == "using-tutorials $ "
     assert env["EXTRA"] == "yes"
 @
 
@@ -405,6 +416,7 @@ def spawn_shell_process(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
 ) -> tuple[int, subprocess.Popen]:
     """Start bash on a PTY and return the master fd and child process."""
@@ -415,7 +427,7 @@ def spawn_shell_process(
         process = subprocess.Popen(
             [shell, "--noprofile", "--norc", "-i"],
             cwd=workspace_path,
-            env=build_shell_environment(env),
+            env=build_shell_environment(env, prompt_name=prompt_name),
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -521,6 +533,7 @@ def run_scripted_shell(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
 ) -> ShellResult:
     """Run ``commands`` in a PTY-backed shell and capture the transcript."""
@@ -529,6 +542,7 @@ def run_scripted_shell(
     master_fd, process = spawn_shell_process(
         workspace=workspace,
         shell=shell,
+        prompt_name=prompt_name,
         env=env,
     )
 
@@ -570,6 +584,16 @@ def test_run_scripted_shell_uses_workspace(tmp_path):
     )
 
     assert (tmp_path / "notes.txt").read_text() == "tutorial\n"
+
+
+def test_run_scripted_shell_uses_named_prompt(tmp_path):
+    result = run_scripted_shell(
+        "pwd",
+        workspace=tmp_path,
+        prompt_name="shell-basics",
+    )
+
+    assert "shell-basics $ " in result.transcript
 
 
 def test_run_scripted_shell_avoids_job_control_warnings(tmp_path):
@@ -668,6 +692,7 @@ def run_interactive_shell(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
 ) -> ShellResult:
     """Open an interactive PTY-backed shell in ``workspace``."""
@@ -679,6 +704,7 @@ def run_interactive_shell(
     master_fd, process = spawn_shell_process(
         workspace=workspace,
         shell=shell,
+        prompt_name=prompt_name,
         env=env,
     )
 

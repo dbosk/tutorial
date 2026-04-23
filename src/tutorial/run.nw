@@ -56,6 +56,7 @@ parsing out of the execution path itself.
 <<imports>>=
 from __future__ import annotations
 
+import inspect
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -319,6 +320,7 @@ def run(
 
         step_result = perform_step(
             step,
+            tutorial_id=tutorial.id,
             workspace=run.workspace,
             shell_runner=self.shell_runner,
             editor_runner=self.editor_runner,
@@ -373,8 +375,12 @@ def test_runner_completes_shell_basics_with_mixed_backends(tmp_path):
         ]
     )
 
-    def scripted_runner(*, workspace):
-        return run_scripted_shell(next(commands), workspace=workspace)
+    def scripted_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     def fake_editor_runner(*, workspace, relative_path, initial_text=None):
         file_path = Path(workspace) / relative_path
@@ -407,8 +413,12 @@ def test_runner_resumes_unfinished_run(tmp_path):
     store = StateStore(tmp_path / "state")
     first_commands = iter(["pwd\n"])
 
-    def first_runner(*, workspace):
-        return run_scripted_shell(next(first_commands), workspace=workspace)
+    def first_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(first_commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     runner = TutorialRunner(
         store,
@@ -429,8 +439,12 @@ def test_runner_resumes_unfinished_run(tmp_path):
         ]
     )
 
-    def second_runner(*, workspace):
-        return run_scripted_shell(next(second_commands), workspace=workspace)
+    def second_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(second_commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     def fake_editor_runner(*, workspace, relative_path, initial_text=None):
         file_path = Path(workspace) / relative_path
@@ -460,8 +474,12 @@ def test_runner_restart_creates_new_run(tmp_path):
     store = StateStore(tmp_path / "state")
     commands = iter(["pwd\n"])
 
-    def first_runner(*, workspace):
-        return run_scripted_shell(next(commands), workspace=workspace)
+    def first_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     first = TutorialRunner(
         store,
@@ -472,8 +490,12 @@ def test_runner_restart_creates_new_run(tmp_path):
 
     restart_commands = iter(["pwd\n"])
 
-    def restart_runner(*, workspace):
-        return run_scripted_shell(next(restart_commands), workspace=workspace)
+    def restart_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(restart_commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
 
     def fake_editor_runner(*, workspace, relative_path, initial_text=None):
         file_path = Path(workspace) / relative_path
@@ -747,6 +769,83 @@ The step model only carries one interaction switch: if [[edit_file]] is
 set, the runner opens that file in an editor.  Otherwise it falls back to
 the existing shell session.
 
+Nested tutorials want the shell prompt to include the tutorial name.  The
+built-in shell backends can accept that prompt name, but injected test or
+host runners may still only accept [[workspace]].  A small adapter keeps
+that compatibility check in one place.
+
+<<functions>>=
+def run_step_shell(
+    shell_runner: Callable[..., ShellResult],
+    *,
+    workspace: str | Path,
+    tutorial_id: str,
+) -> ShellResult:
+    """Run one shell step, passing a prompt name when supported."""
+
+    try:
+        parameters = inspect.signature(shell_runner).parameters.values()
+    except (TypeError, ValueError):
+        return shell_runner(workspace=workspace)
+
+    accepts_prompt_name = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or parameter.name == "prompt_name"
+        for parameter in parameters
+    )
+    if accepts_prompt_name:
+        return shell_runner(
+            workspace=workspace,
+            prompt_name=tutorial_id,
+        )
+    return shell_runner(workspace=workspace)
+@
+
+<<test functions>>=
+def test_run_step_shell_passes_prompt_name_when_supported(tmp_path):
+    calls = []
+
+    def prompt_aware_runner(*, workspace, prompt_name="tutorial"):
+        calls.append((workspace, prompt_name))
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="shell-basics $ pwd\n",
+        )
+
+    result = run_step_shell(
+        prompt_aware_runner,
+        workspace=tmp_path,
+        tutorial_id="shell-basics",
+    )
+
+    assert result.exit_status == 0
+    assert calls == [(tmp_path, "shell-basics")]
+
+
+def test_run_step_shell_keeps_legacy_runners_compatible(tmp_path):
+    calls = []
+
+    def legacy_runner(*, workspace):
+        calls.append(workspace)
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd\n",
+        )
+
+    result = run_step_shell(
+        legacy_runner,
+        workspace=tmp_path,
+        tutorial_id="shell-basics",
+    )
+
+    assert result.exit_status == 0
+    assert calls == [tmp_path]
+@
+
 Using a small dispatch helper keeps the main run loop focused on resume
 and persistence policy rather than on backend selection.
 
@@ -754,6 +853,7 @@ and persistence policy rather than on backend selection.
 def perform_step(
     step: TutorialStep,
     *,
+    tutorial_id: str,
     workspace: str | Path,
     shell_runner: Callable[..., ShellResult],
     editor_runner: Callable[..., EditorResult],
@@ -765,7 +865,11 @@ def perform_step(
             workspace=workspace,
             relative_path=step.edit_file,
         )
-    return shell_runner(workspace=workspace)
+    return run_step_shell(
+        shell_runner,
+        workspace=workspace,
+        tutorial_id=tutorial_id,
+    )
 @
 
 <<test functions>>=
@@ -788,6 +892,7 @@ def test_perform_step_dispatches_to_editor_runner(tmp_path):
             instructions="Open notes.txt.",
             edit_file="notes.txt",
         ),
+        tutorial_id="shell-basics",
         workspace=tmp_path,
         shell_runner=run_scripted_shell,
         editor_runner=fake_editor_runner,
