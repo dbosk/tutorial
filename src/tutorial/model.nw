@@ -5,10 +5,10 @@ The model layer answers two questions.  First, what information do we
 need to describe a tutorial step?  Second, what information do we need
 to preserve after the student has interacted with the shell?
 
-We keep the answer deliberately small.  A step has human-facing text
-and one or two machine-checkable expectations; a run stores the
-transcripts that were produced while the student worked through the
-tutorial.
+We keep the answer deliberately small.  A step has human-facing text,
+may optionally open a file in an editor, and carries one or two
+machine-checkable expectations; a run stores the recorded text that was
+produced while the student worked through the tutorial.
 
 
 \section{Code overview}
@@ -49,6 +49,11 @@ Each step needs enough information for two different readers.
 The student needs a title and instructions, while the runner needs a
 small, explicit check that tells it whether the student can move on.
 
+The step also needs one small interaction choice.  Most steps still open
+an interactive shell, but some tasks are clearer in an editor.  An
+optional file path is enough to distinguish those editor-backed steps
+without introducing a larger action language in the first release.
+
 The student-facing prose is still stored as plain strings, but we author
 those strings as Markdown.  That gives the CLI room to render short
 paragraphs and inline commands without inventing a larger tutorial markup
@@ -56,8 +61,9 @@ format in the first release.
 
 We support two complementary checks:
 \begin{description}
-\item[Transcript patterns] small strings that should appear in the saved
-  transcript when the student uses the intended command.
+\item[Recorded-text patterns] small strings that should appear in the
+  saved text for the step, whether that text came from a shell session or
+  from an edited file.
 \item[Shell checks] a shell command that must succeed in the step
   workspace.
 \end{description}
@@ -76,6 +82,7 @@ class TutorialStep:
     required_patterns: tuple[str, ...] = ()
     check_command: str | None = None
     hint: str | None = None
+    edit_file: str | None = None
 @
 
 Let's verify that a step can carry both transcript checks and a shell
@@ -92,6 +99,16 @@ def test_tutorial_step_keeps_validation_rules():
 
     assert step.required_patterns == ("notes.txt",)
     assert step.check_command == "test -f notes.txt"
+
+
+def test_tutorial_step_can_request_editor_file():
+    step = TutorialStep(
+        title="Edit a file",
+        instructions="Open notes.txt and update it.",
+        edit_file="notes.txt",
+    )
+
+    assert step.edit_file == "notes.txt"
 @
 
 
@@ -137,10 +154,15 @@ def test_tutorial_groups_steps_under_stable_id():
 
 \section{Recording step transcripts}
 
-Review only works if we keep the output that flowed through the shell,
-and progress tracking is more useful when it records whether the step
-was judged complete.  A transcript therefore captures the shell output,
-the exit status, and a boolean completion flag.
+Review only works if we keep the text the student produced, and progress
+tracking is more useful when it records whether the step was judged
+complete.  A transcript therefore captures the recorded text for the
+step, the exit status, and a boolean completion flag.
+
+Shell steps save the visible shell transcript.  Editor steps instead save
+the edited file contents and remember which file that text came from.
+That keeps review small while still making editor-backed steps readable
+after the original workspace changes.
 
 <<classes>>=
 @dataclass
@@ -155,6 +177,7 @@ class StepTranscript:
     exit_status: int
     transcript: str
     passed: bool = False
+    edited_file: str | None = None
 @
 
 <<test functions>>=
@@ -170,6 +193,21 @@ def test_step_transcript_defaults_to_not_passed():
     )
 
     assert transcript.passed is False
+
+
+def test_step_transcript_can_store_edited_file_label():
+    transcript = StepTranscript(
+        tutorial_id="demo",
+        step_index=0,
+        title="Edit notes",
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="tutorial basics\n",
+        edited_file="notes.txt",
+    )
+
+    assert transcript.edited_file == "notes.txt"
 @
 
 

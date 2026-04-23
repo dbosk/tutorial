@@ -553,6 +553,24 @@ def test_transcript_from_dict_restores_passed_flag():
     )
 
     assert transcript.passed is True
+
+
+def test_transcript_from_dict_restores_edited_file_label():
+    transcript = transcript_from_dict(
+        {
+            "tutorial_id": "demo",
+            "step_index": 1,
+            "title": "Edit config",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "ended_at": "2026-01-01T00:00:01+00:00",
+            "exit_status": 0,
+            "transcript": "name=tutorial\n",
+            "passed": True,
+            "edited_file": "config.ini",
+        }
+    )
+
+    assert transcript.edited_file == "config.ini"
 @
 
 
@@ -598,6 +616,7 @@ def test_run_from_dict_restores_nested_transcripts():
     )
 
     assert run.transcripts[0].title == "One"
+    assert run.transcripts[0].edited_file is None
 @
 
 

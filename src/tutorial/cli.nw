@@ -21,13 +21,14 @@ layer and only varies the argument plumbing.
 
 <<functions>>
 
-app = create_app()
+app = create_app(tutorial_paths=standalone_tutorial_paths())
 @
 
 <<test [[cli.py]]>>=
 """Tests for the CLI helpers."""
 
 import argparse
+from pathlib import Path
 from io import StringIO
 
 import pytest
@@ -39,6 +40,7 @@ from typer.testing import CliRunner
 from tutorial.cli import *
 from tutorial.model import StepTranscript
 from tutorial.run import write_demo_tutorial
+from tutorial.shell import EditorResult
 from tutorial.shell import run_scripted_shell
 from tutorial.state import StateStore
 
@@ -60,12 +62,15 @@ from typing import Annotated
 from typing import Callable
 
 from tutorial.catalog import TutorialCatalog
+from tutorial.catalog import builtin_tutorial_paths
+from tutorial.catalog import universal_tutorial_path
 from rich.console import Console
 from rich.markdown import Markdown
 import typer
 
 from tutorial.run import RunResult
 from tutorial.run import TutorialRunner
+from tutorial.shell import run_editor
 from tutorial.shell import run_interactive_shell
 from tutorial.state import ProgressState
 from tutorial.state import StateStore
@@ -85,6 +90,7 @@ def build_runner(
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
     allow_shell_checks: bool = False,
 ) -> TutorialRunner:
     """Build a tutorial runner for one CLI host namespace."""
@@ -93,6 +99,7 @@ def build_runner(
         StateStore(state_root, namespace=namespace),
         TutorialCatalog(tutorial_paths),
         shell_runner=shell_runner,
+        editor_runner=editor_runner,
         allow_shell_checks=allow_shell_checks,
     )
 @
@@ -120,6 +127,53 @@ def effective_tutorial_paths(
     """Return the combined tutorial paths for one command invocation."""
 
     return tuple(configured_paths) + tuple(command_paths)
+@
+
+
+\section{Selecting built-in tutorial sets}
+
+The standalone command and embedded hosts should not expose the same
+default catalog.
+
+The standalone [[tutorial]] command should feel ready to use on first
+launch, so it gets the full packaged sequence.  Embedded hosts are
+different: the host decides which application-specific tutorials to add,
+but the universal usage tutorial should still come first so students see
+the common interaction model before the host-specific lessons.
+
+Command-line [[--tutorial-path]] additions remain explicit extras.  They
+come after the configured defaults so packaged onboarding still appears
+first in the list.
+
+<<functions>>=
+def standalone_tutorial_paths() -> tuple[Path, ...]:
+    """Return the packaged built-ins for the standalone CLI."""
+
+    return builtin_tutorial_paths()
+@
+
+<<functions>>=
+def embedded_tutorial_paths(
+    tutorial_paths: tuple[str | Path, ...],
+) -> tuple[str | Path, ...]:
+    """Return host tutorial paths prefixed by the universal tutorial."""
+
+    return effective_tutorial_paths((universal_tutorial_path(),), tutorial_paths)
+@
+
+<<test functions>>=
+def test_standalone_tutorial_paths_match_builtin_catalog():
+    assert standalone_tutorial_paths() == builtin_tutorial_paths()
+
+
+def test_embedded_tutorial_paths_prepends_universal_tutorial():
+    host_paths = (Path("/tmp/host.md"), Path("/tmp/more"))
+
+    assert embedded_tutorial_paths(host_paths) == (
+        universal_tutorial_path(),
+        Path("/tmp/host.md"),
+        Path("/tmp/more"),
+    )
 @
 
 <<functions>>=
@@ -188,9 +242,9 @@ Review is small by design, but it still needs enough structure that a
 student can distinguish one step's transcript from the next.
 
 Rich helps with the headings and spacing, but the transcript itself is
-not authored Markdown.  It is shell output, so review must print it
-literally rather than treating square brackets or similar text as Rich
-markup.
+not authored Markdown.  It may be shell output or saved file contents, so
+review must print it literally rather than treating square brackets or
+similar text as Rich markup.
 
 <<functions>>=
 def render_review_output(
@@ -214,6 +268,8 @@ def render_review_output(
             style="bold",
         )
         console.print(f"Status: {status}", style="dim")
+        if transcript.edited_file:
+            console.print(f"Edited file: {transcript.edited_file}", style="dim")
         console.print(
             transcript.transcript.rstrip("\n"),
             highlight=False,
@@ -288,19 +344,56 @@ def test_render_review_output_prints_transcript_literally():
 
     output = buffer.getvalue()
     assert "[green]literal[/green]" in output
+
+
+def test_render_review_output_labels_editor_steps():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_review_output(
+        console,
+        "Shell Basics",
+        "run-1",
+        "/tmp/demo",
+        (
+            StepTranscript(
+                tutorial_id="shell-basics",
+                step_index=2,
+                title="Edit the note",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript="tutorial\n",
+                passed=True,
+                edited_file="notes.txt",
+            ),
+        ),
+    )
+
+    output = buffer.getvalue()
+    assert "Edited file: notes.txt" in output
 @
 
 
 \section{Formatting step prompts}
 
-Each step opens a fresh shell, so the CLI must print the instructions
-before the shell starts.  We author that student-facing text as Markdown
-and render it with Rich [[Markdown]] so paragraphs and inline commands
-read cleanly in an ordinary terminal.
+Each step opens a fresh interaction, so the CLI must print the
+instructions before that interaction starts.  We author that
+student-facing text as Markdown and render it with Rich [[Markdown]] so
+paragraphs and inline commands read cleanly in an ordinary terminal.
 
 A little vertical space around the body matters too.  Without it, the
-workspace line, the instructions, and the exit reminder blur together
-into one dense block of text.
+workspace line, the instructions, and the interaction reminder blur
+together into one dense block of text.
+
+The reminder itself depends on the step mode.  Shell steps ask the
+student to exit the shell, while editor steps ask them to save and quit
+the editor.
 
 <<functions>>=
 def render_step_prompt(
@@ -311,6 +404,8 @@ def render_step_prompt(
     step_title: str,
     instructions: str,
     workspace: str,
+    *,
+    edit_file: str | None = None,
 ) -> None:
     """Render the prompt shown before one interactive step."""
 
@@ -321,13 +416,22 @@ def render_step_prompt(
         style="bold",
     )
     console.print(f"Workspace: {workspace}", style="dim")
+    if edit_file is not None:
+        console.print(f"File: {edit_file}", style="dim")
     console.print()
     console.print(Markdown(instructions))
     console.print()
-    console.print(
-        "Exit the shell when you want the tutorial to validate the step.",
-        style="dim",
-    )
+    if edit_file is None:
+        console.print(
+            "Exit the shell when you want the tutorial to validate the step.",
+            style="dim",
+        )
+    else:
+        console.print(
+            "Save the file and quit the editor when you want the tutorial "
+            "to validate the step.",
+            style="dim",
+        )
     console.print()
 @
 
@@ -358,6 +462,109 @@ def test_render_step_prompt_uses_markdown_and_spacing():
     assert "This shows where the tutorial stores its work." in output
     assert "\n\nExit the shell when you want" in output
     assert "`pwd`" not in output
+
+
+def test_render_step_prompt_mentions_editor_file_when_needed():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_step_prompt(
+        console,
+        "Shell Basics",
+        3,
+        4,
+        "Edit the note",
+        "Open `notes.txt` and add `tutorial`.",
+        "/tmp/demo",
+        edit_file="notes.txt",
+    )
+
+    output = buffer.getvalue()
+    assert "File: notes.txt" in output
+    assert "Save the file and quit the editor" in output
+@
+
+
+\section{Confirming full-screen editor steps}
+
+Shell steps can start immediately because the instructions remain visible in
+the scrollback while the shell runs.  A full-screen editor usually clears
+that context from view.  We therefore pause once more and ask for explicit
+confirmation before launching the editor-backed step.
+
+An empty answer counts as acceptance because pressing Enter is often the
+natural "I have read this, continue" gesture in terminal tools.  A
+negative answer keeps the tutorial at the prompt instead of opening the
+editor unexpectedly.
+
+<<functions>>=
+def normalise_editor_start_choice(choice: str) -> bool | None:
+    """Return whether ``choice`` confirms launching the editor."""
+
+    normalised = choice.strip().lower()
+    if normalised in {"", "y", "yes"}:
+        return True
+    if normalised in {"n", "no"}:
+        return False
+    return None
+@
+
+Let's verify that Enter and yes start the editor, while no declines it.
+
+<<test functions>>=
+def test_normalise_editor_start_choice_accepts_enter_and_yes():
+    assert normalise_editor_start_choice("") is True
+    assert normalise_editor_start_choice("yes") is True
+    assert normalise_editor_start_choice("Y") is True
+    assert normalise_editor_start_choice("no") is False
+    assert normalise_editor_start_choice("later") is None
+@
+
+<<functions>>=
+def prompt_to_start_editor(
+    console: Console,
+    prompt_for_input: Callable[[str], str],
+) -> None:
+    """Wait for confirmation before opening a full-screen editor."""
+
+    prompt = "Start the editor? [Y/n]"
+    while True:
+        confirmation = normalise_editor_start_choice(prompt_for_input(prompt))
+        if confirmation is True:
+            return
+        if confirmation is False:
+            console.print(
+                "Answer yes when you are ready to open the editor.",
+                style="dim",
+            )
+            continue
+        console.print("Answer yes or no.", style="dim")
+@
+
+<<test functions>>=
+def test_prompt_to_start_editor_waits_for_confirmation():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+    answers = iter(["maybe", "no", ""])
+
+    prompt_to_start_editor(
+        console,
+        lambda prompt: next(answers),
+    )
+
+    output = buffer.getvalue()
+    assert "Answer yes or no." in output
+    assert "Answer yes when you are ready" in output
 @
 
 
@@ -530,6 +737,7 @@ def handle_blocked_step(
                 result.blocked_step.title,
                 result.blocked_step.instructions,
                 result.run.workspace,
+                edit_file=result.blocked_step.edit_file,
             )
             continue
 
@@ -648,7 +856,7 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
         [
             "pwd\n",
             "pwd\nls\n",
-            "printf 'tutorial\\n' > notes.txt\n",
+            "touch notes.txt\n",
             "cat notes.txt\n",
         ]
     )
@@ -656,10 +864,22 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
     def scripted_runner(*, workspace):
         return run_scripted_shell(next(commands), workspace=workspace)
 
+    def fake_editor_runner(*, workspace, relative_path, initial_text=None):
+        file_path = Path(workspace) / relative_path
+        file_path.write_text("tutorial\n")
+        return EditorResult(
+            started_at="2026-01-01T00:00:01+00:00",
+            ended_at="2026-01-01T00:00:02+00:00",
+            exit_status=0,
+            file_path=str(file_path),
+            text="tutorial\n",
+        )
+
     tutorial_runner = build_runner(
         state_root=tmp_path / "state",
         tutorial_paths=(tutorial_path,),
         shell_runner=scripted_runner,
+        editor_runner=fake_editor_runner,
         allow_shell_checks=True,
     )
     buffer = StringIO()
@@ -726,6 +946,7 @@ def create_app(
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Create a Typer application for tutorials."""
@@ -746,6 +967,7 @@ def create_app(
             state_root=state_root,
             tutorial_paths=paths,
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
             allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
         )
 
@@ -816,6 +1038,9 @@ def create_app(
         def prompt_for_input(prompt: str) -> str:
             return typer.prompt(prompt)
 
+        def prompt_for_editor_start(prompt: str) -> str:
+            return typer.prompt(prompt, default="", show_default=False)
+
         def before_step(tutorial, step_index, step, run) -> None:
             render_step_prompt(
                 console,
@@ -825,7 +1050,10 @@ def create_app(
                 step.title,
                 step.instructions,
                 run.workspace,
+                edit_file=step.edit_file,
             )
+            if step.edit_file is not None:
+                prompt_to_start_editor(console, prompt_for_editor_start)
 
         try:
             tutorial_runner = runner(
@@ -896,9 +1124,9 @@ def create_app(
     return application
 @
 
-Let's verify that the generated application exposes the file-backed
-tutorial commands with explicit tutorial paths for loading and pathless
-review for saved runs.
+Let's verify that the generated application exposes list/run commands that
+can load configured tutorials and a review command that still works from
+saved runs alone.
 
 <<test functions>>=
 def test_list_command_shows_shell_basics(tmp_path):
@@ -911,6 +1139,22 @@ def test_list_command_shows_shell_basics(tmp_path):
 
     assert result.exit_code == 0
     assert "shell-basics" in result.stdout
+
+
+def test_standalone_app_lists_packaged_builtins_without_tutorial_path(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(
+        create_app(
+            state_root=tmp_path / "state",
+            tutorial_paths=standalone_tutorial_paths(),
+        ),
+        ["list"],
+    )
+
+    assert result.exit_code == 0
+    assert "using-tutorials" in result.stdout
+    assert "shell-basics" in result.stdout
+    assert "writing-tutorials" in result.stdout
 
 
 def test_review_command_shows_saved_transcript(tmp_path):
@@ -948,7 +1192,7 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
         [
             "pwd\n",
             "pwd\nls\n",
-            "printf 'tutorial\\n' > notes.txt\n",
+            "touch notes.txt\n",
             "cat notes.txt\n",
         ]
     )
@@ -956,9 +1200,24 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
     def scripted_runner(*, workspace):
         return run_scripted_shell(next(commands), workspace=workspace)
 
+    def fake_editor_runner(*, workspace, relative_path, initial_text=None):
+        file_path = Path(workspace) / relative_path
+        file_path.write_text("tutorial\n")
+        return EditorResult(
+            started_at="2026-01-01T00:00:01+00:00",
+            ended_at="2026-01-01T00:00:02+00:00",
+            exit_status=0,
+            file_path=str(file_path),
+            text="tutorial\n",
+        )
+
     runner = CliRunner()
     result = runner.invoke(
-        create_app(state_root=tmp_path / "state", shell_runner=scripted_runner),
+        create_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+            editor_runner=fake_editor_runner,
+        ),
         [
             "run",
             "--tutorial-path",
@@ -966,11 +1225,12 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
             "--allow-shell-checks",
             "shell-basics",
         ],
-        input="try again\n",
+        input="try again\n\n",
     )
 
     assert result.exit_code == 0
     assert "Step not complete yet: Inspect the workspace" in result.stdout
+    assert "Start the editor? [Y/n]" in result.stdout
     assert "Completed shell-basics" in result.stdout
 @
 
@@ -1016,11 +1276,11 @@ def test_emit_run_summary_reports_completed_tutorial(capsys, tmp_path):
         run=run,
         progress=ProgressState(
             tutorial_id=tutorial.id,
-            total_steps=3,
-            completed_steps=3,
+            total_steps=len(tutorial.steps),
+            completed_steps=len(tutorial.steps),
             finished=True,
         ),
-        executed_steps=3,
+        executed_steps=len(tutorial.steps),
     )
 
     emit_run_summary(result)
@@ -1045,6 +1305,7 @@ def add_typer_subcommand(
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Attach the tutorial CLI as a Typer subcommand."""
@@ -1052,8 +1313,9 @@ def add_typer_subcommand(
     child_app = create_app(
         namespace=namespace,
         state_root=state_root,
-        tutorial_paths=tutorial_paths,
+        tutorial_paths=embedded_tutorial_paths(tutorial_paths),
         shell_runner=shell_runner,
+        editor_runner=editor_runner,
         allow_shell_checks=allow_shell_checks,
     )
     parent_app.add_typer(child_app, name=name)
@@ -1074,6 +1336,24 @@ def test_add_typer_subcommand_registers_tutorial_namespace(tmp_path):
 
     assert result.exit_code == 0
     assert "shell-basics" in result.stdout
+
+
+def test_add_typer_subcommand_prepends_universal_tutorial(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    parent = typer.Typer()
+    add_typer_subcommand(
+        parent,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial", "list"])
+
+    assert result.exit_code == 0
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines[0].startswith("using-tutorials:")
+    assert any(line.startswith("shell-basics:") for line in lines[1:])
 @
 
 
@@ -1092,6 +1372,7 @@ def add_argparse_subcommand(
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
     allow_shell_checks: bool = False,
 ) -> argparse.ArgumentParser:
     """Attach the tutorial CLI as an argparse subcommand tree."""
@@ -1112,8 +1393,9 @@ def add_argparse_subcommand(
             args,
             namespace=namespace,
             state_root=state_root,
-            tutorial_paths=tutorial_paths,
+            tutorial_paths=embedded_tutorial_paths(tutorial_paths),
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
         )
     )
 
@@ -1129,8 +1411,9 @@ def add_argparse_subcommand(
             args,
             namespace=namespace,
             state_root=state_root,
-            tutorial_paths=tutorial_paths,
+            tutorial_paths=embedded_tutorial_paths(tutorial_paths),
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
         )
     )
 
@@ -1153,8 +1436,9 @@ def add_argparse_subcommand(
             args,
             namespace=namespace,
             state_root=state_root,
-            tutorial_paths=tutorial_paths,
+            tutorial_paths=embedded_tutorial_paths(tutorial_paths),
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
             allow_shell_checks=allow_shell_checks,
         )
     )
@@ -1177,6 +1461,27 @@ def test_add_argparse_subcommand_creates_dispatchable_handler(tmp_path, capsys):
 
     assert exit_code == 0
     assert "shell-basics" in captured.out
+
+
+def test_add_argparse_subcommand_prepends_universal_tutorial(tmp_path, capsys):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+    add_argparse_subcommand(
+        subparsers,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+    )
+
+    args = parser.parse_args(["tutorial", "list"])
+    exit_code = run_argparse_command(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert lines[0].startswith("using-tutorials:")
+    assert any(line.startswith("shell-basics:") for line in lines[1:])
 @
 
 
@@ -1210,6 +1515,7 @@ def argparse_list_command(
     state_root: str | Path | None,
     tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
+    editor_runner: Callable[..., object],
 ) -> int:
     """Implement the argparse ``list`` subcommand."""
 
@@ -1224,6 +1530,7 @@ def argparse_list_command(
                 )
             ),
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
         )
     except (RuntimeError, ValueError) as error:
         print(error)
@@ -1241,6 +1548,7 @@ def argparse_review_command(
     state_root: str | Path | None,
     tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
+    editor_runner: Callable[..., object],
 ) -> int:
     """Implement the argparse ``review`` subcommand."""
 
@@ -1249,6 +1557,7 @@ def argparse_review_command(
         state_root=state_root,
         tutorial_paths=tutorial_paths,
         shell_runner=shell_runner,
+        editor_runner=editor_runner,
     )
     console = Console()
     try:
@@ -1301,6 +1610,7 @@ def test_argparse_review_command_shows_saved_transcript(tmp_path, capsys):
         state_root=tmp_path / "state",
         tutorial_paths=(),
         shell_runner=run_scripted_shell,
+        editor_runner=run_editor,
     )
     captured = capsys.readouterr()
 
@@ -1317,6 +1627,7 @@ def argparse_run_command(
     state_root: str | Path | None,
     tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
+    editor_runner: Callable[..., object],
     allow_shell_checks: bool,
 ) -> int:
     """Implement the argparse ``run`` subcommand."""
@@ -1332,6 +1643,7 @@ def argparse_run_command(
                 )
             ),
             shell_runner=shell_runner,
+            editor_runner=editor_runner,
             allow_shell_checks=allow_shell_checks or args.allow_shell_checks,
         )
         console = Console()
@@ -1348,7 +1660,10 @@ def argparse_run_command(
                 step.title,
                 step.instructions,
                 run.workspace,
+                edit_file=step.edit_file,
             )
+            if step.edit_file is not None:
+                prompt_to_start_editor(console, prompt_for_input)
 
         result = run_tutorial_with_menu(
             tutorial_runner,

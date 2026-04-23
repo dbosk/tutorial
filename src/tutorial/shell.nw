@@ -18,6 +18,7 @@ that reflects what actually appeared in the terminal.
 <<imports>>
 
 <<classes>>
+<<constants>>
 <<functions>>
 @
 
@@ -25,6 +26,8 @@ that reflects what actually appeared in the terminal.
 """Tests for shell session helpers."""
 
 from pathlib import Path
+
+import pytest
 
 from tutorial.shell import *
 
@@ -38,6 +41,10 @@ The shell backend stays in the standard library.  That keeps the first
 release easy to install and focuses the implementation effort on the PTY
 behaviour itself rather than on a higher-level UI framework.
 
+We also keep editor launching in the same module because it has the same
+terminal constraint as the interactive shell path: the child process must
+talk directly to the user's TTY rather than to a captured pipe.
+
 <<imports>>=
 from __future__ import annotations
 
@@ -45,7 +52,9 @@ import errno
 import fcntl
 import os
 import pty
+import shlex
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -74,6 +83,18 @@ class ShellResult:
     transcript: str
 @
 
+<<classes>>=
+@dataclass(frozen=True)
+class EditorResult:
+    """Captured result of one editor session."""
+
+    started_at: str
+    ended_at: str
+    exit_status: int
+    file_path: str
+    text: str
+@
+
 Let's verify that the result object keeps the captured transcript text.
 
 <<test functions>>=
@@ -86,6 +107,19 @@ def test_shell_result_stores_transcript_text():
     )
 
     assert "pwd" in result.transcript
+
+
+def test_editor_result_stores_edited_text():
+    result = EditorResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        file_path="/tmp/demo/notes.txt",
+        text="tutorial\n",
+    )
+
+    assert result.file_path.endswith("notes.txt")
+    assert result.text == "tutorial\n"
 @
 
 
@@ -127,6 +161,214 @@ def test_build_shell_environment_sets_prompt():
 
     assert env["PS1"] == "tutorial$ "
     assert env["EXTRA"] == "yes"
+@
+
+
+\section{Resolving which editor to run}
+
+[[EDITOR]] often contains both a program name and flags such as
+[[code --wait]] or [[emacsclient -c]].  Splitting that value with
+[[shlex]] preserves the conventional shell-style configuration while
+still letting us append the target file path as a separate argument.
+
+When [[EDITOR]] is not set, we fall back to a short list of common
+interactive editors and pick the first one available on [[PATH]].
+
+<<constants>>=
+DEFAULT_EDITORS = ("vim", "vi", "nano")
+@
+
+<<functions>>=
+def resolve_editor_command(
+    env: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return the configured editor command as an argument tuple."""
+
+    environment = os.environ if env is None else env
+    editor = environment.get("EDITOR", "").strip()
+    if editor:
+        return tuple(shlex.split(editor))
+
+    for candidate in DEFAULT_EDITORS:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return (resolved,)
+
+    raise RuntimeError(
+        "No editor configured. Set $EDITOR or install vim, vi, or nano."
+    )
+@
+
+Let's verify that an explicit [[EDITOR]] value wins and that the fallback
+search returns the first available common editor.
+
+<<test functions>>=
+def test_resolve_editor_command_uses_editor_environment_variable():
+    assert resolve_editor_command({"EDITOR": "code --wait"}) == (
+        "code",
+        "--wait",
+    )
+
+
+def test_resolve_editor_command_falls_back_to_first_available_editor(monkeypatch):
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name == "vi" else None,
+    )
+
+    assert resolve_editor_command() == ("/usr/bin/vi",)
+@
+
+
+\section{Preparing one editable file}
+
+Editor-backed steps need a concrete file path before the editor opens.
+Creating parent directories here keeps the launch path small, and only
+writing initial contents when the file does not yet exist avoids clobbering
+work during retries or resumed runs.
+
+We also require the configured path to stay inside the workspace.  A
+tutorial may choose the file name, but it should not silently send the
+student's editor to an unrelated absolute path.
+
+<<functions>>=
+def workspace_relative_path(relative_path: str) -> Path:
+    """Return ``relative_path`` as a safe path below the workspace."""
+
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            "Editor steps require a relative path inside the workspace."
+        )
+    return path
+@
+
+<<functions>>=
+def prepare_editor_file(
+    *,
+    workspace: str | Path,
+    relative_path: str,
+    initial_text: str | None = None,
+) -> Path:
+    """Return the editable file path inside ``workspace``."""
+
+    file_path = Path(workspace) / workspace_relative_path(relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    if initial_text is not None and not file_path.exists():
+        file_path.write_text(initial_text)
+    return file_path
+@
+
+<<test functions>>=
+def test_prepare_editor_file_creates_parent_directories(tmp_path):
+    file_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes/answer.txt",
+    )
+
+    assert file_path.parent.is_dir()
+
+
+def test_prepare_editor_file_only_writes_initial_text_once(tmp_path):
+    file_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="first\n",
+    )
+    file_path.write_text("second\n")
+
+    same_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="first\n",
+    )
+
+    assert same_path.read_text() == "second\n"
+
+
+def test_prepare_editor_file_rejects_paths_outside_workspace(tmp_path):
+    with pytest.raises(ValueError, match="relative path inside the workspace"):
+        prepare_editor_file(
+            workspace=tmp_path,
+            relative_path="../notes.txt",
+        )
+@
+
+
+\section{Running interactive editor sessions}
+
+Unlike the PTY-backed shell, an interactive editor should own the user's
+terminal directly.  Full-screen programs such as [[vim]] already know how
+to manage the terminal when connected to the inherited TTY, and we do not
+need to capture every keystroke.  We therefore launch the editor as a
+foreground subprocess, wait for it to exit, and then read the file.
+
+<<functions>>=
+def run_editor(
+    *,
+    workspace: str | Path,
+    relative_path: str,
+    initial_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> EditorResult:
+    """Open the configured editor for one file in ``workspace``."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("Interactive editor steps require a TTY.")
+
+    started_at = utc_now()
+    environment = build_shell_environment(env)
+    command = resolve_editor_command(environment)
+    file_path = prepare_editor_file(
+        workspace=workspace,
+        relative_path=relative_path,
+        initial_text=initial_text,
+    )
+    completed = subprocess.run(
+        [*command, str(file_path)],
+        cwd=Path(workspace),
+        env=environment,
+    )
+    ended_at = utc_now()
+    text = file_path.read_text() if file_path.exists() else ""
+
+    return EditorResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=completed.returncode,
+        file_path=str(file_path),
+        text=text,
+    )
+@
+
+The real editor path needs a TTY, so unit tests inject a harmless command
+through [[EDITOR]] and only verify the file lifecycle around it.
+
+<<test functions>>=
+def test_run_editor_reads_back_edited_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setenv("EDITOR", "true")
+
+    result = run_editor(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="tutorial\n",
+    )
+
+    assert result.exit_status == 0
+    assert result.text == "tutorial\n"
+    assert result.file_path.endswith("notes.txt")
+
+
+def test_run_editor_requires_tty(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    with pytest.raises(RuntimeError, match="require a TTY"):
+        run_editor(workspace=tmp_path, relative_path="notes.txt")
 @
 
 

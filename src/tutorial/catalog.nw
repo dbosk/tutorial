@@ -41,7 +41,7 @@ from tutorial.catalog import *
 The catalog layer combines three small tools:
 \begin{description}
 \item[[[pathlib]]]
-  to resolve explicit tutorial paths.
+  to resolve explicit tutorial paths and packaged built-ins.
 \item[[[hashlib]]]
   to fingerprint tutorial files so resumed runs can detect changes.
 \item[[[yaml]]]
@@ -186,9 +186,9 @@ def test_catalog_get_tutorial_rejects_unknown_ids(tmp_path):
 
 \section{Resolving explicit tutorial paths}
 
-The standalone CLI should only use paths that were given explicitly.
-That still leaves one small convenience choice: if the explicit path is a
-directory, we load every Markdown file below it.
+Packaged built-ins are only one source of tutorials.  Callers may still
+provide extra Markdown files or directories explicitly, and a directory is
+most useful when it expands to every tutorial file below it.
 
 <<functions>>=
 def resolve_tutorial_files(
@@ -231,8 +231,78 @@ def resolve_tutorial_files(
     return tuple(files)
 @
 
+
+\section{Locating packaged built-in tutorials}
+
+The standalone command should work without any extra setup, so the
+package also ships a small set of Markdown tutorials.  We keep them as
+ordinary files under [[src/tutorial/tutorials/]] rather than embedding
+them as opaque resources.  That keeps their paths stable for resume logic
+and for review output that wants to remember where a tutorial came from.
+
+The built-ins also have a deliberate learning order:
+\begin{description}
+\item[[[using-tutorials]]]
+  teaches how interactive runs behave.
+\item[[[shell-basics]]]
+  supplies the shell and editor skills needed for authoring.
+\item[[[writing-tutorials]]]
+  then builds on those earlier two tutorials.
+\end{description}
+
+<<constants>>=
+BUILTIN_TUTORIAL_DIR = Path(__file__).with_name("tutorials")
+BUILTIN_TUTORIAL_FILES = (
+    "using-tutorials.md",
+    "shell-basics.md",
+    "writing-tutorials.md",
+)
+UNIVERSAL_TUTORIAL_FILE = "using-tutorials.md"
+@
+
+<<functions>>=
+def builtin_tutorial_dir() -> Path:
+    """Return the directory that contains packaged built-in tutorials."""
+
+    return BUILTIN_TUTORIAL_DIR
+@
+
+<<functions>>=
+def builtin_tutorial_paths() -> tuple[Path, ...]:
+    """Return the packaged built-in tutorial files in learning order."""
+
+    return tuple(builtin_tutorial_dir() / name for name in BUILTIN_TUTORIAL_FILES)
+@
+
+<<functions>>=
+def universal_tutorial_path() -> Path:
+    """Return the packaged universal usage tutorial path."""
+
+    return builtin_tutorial_dir() / UNIVERSAL_TUTORIAL_FILE
+@
+
+Let's verify that the packaged tutorial list stays ordered and points at
+real files.
+
+<<test functions>>=
+def test_builtin_tutorial_paths_keep_expected_learning_order():
+    paths = builtin_tutorial_paths()
+
+    assert tuple(path.name for path in paths) == (
+        "using-tutorials.md",
+        "shell-basics.md",
+        "writing-tutorials.md",
+    )
+    assert universal_tutorial_path() == paths[0]
+
+
+def test_builtin_tutorial_paths_exist_on_disk():
+    for path in builtin_tutorial_paths():
+        assert path.is_file()
+@
+
 Let's verify that a single file and a directory can be mixed in one
-explicit path list.
+explicit path list after the packaged defaults.
 
 <<test functions>>=
 def test_resolve_tutorial_files_accepts_file_and_directory(tmp_path):
@@ -401,9 +471,10 @@ def split_step_sections(body: str) -> tuple[tuple[str, str], ...]:
 
 \section{Optional per-step metadata blocks}
 
-Most of the step body should stay ordinary Markdown.  Validation rules and
-hints are the exception, so we reserve a small leading code fence with the
-language tag [[tutorial-step]] for that metadata.
+Most of the step body should stay ordinary Markdown.  Validation rules,
+hints, and editor-step configuration are the exception, so we reserve a
+small leading code fence with the language tag [[tutorial-step]] for that
+metadata.
 
 <<constants>>=
 STEP_METADATA_FENCE = "```tutorial-step"
@@ -433,6 +504,9 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
 
 Once the optional metadata block is separated from the Markdown body, the
 remaining conversion is a straightforward mapping onto [[TutorialStep]].
+The only interaction-specific field is [[edit_file]], which tells the
+runner to open that workspace-relative path in an editor instead of
+launching a shell for the step.
 
 <<functions>>=
 def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
@@ -441,7 +515,7 @@ def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
     metadata, instructions = step_metadata_and_instructions(section_body)
     reject_unknown_keys(
         metadata,
-        {"required_patterns", "check_command", "hint"},
+        {"required_patterns", "check_command", "hint", "edit_file"},
         f"Step {title!r}",
     )
     if not instructions:
@@ -459,6 +533,10 @@ def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
             f"Step {title!r} check_command",
         ),
         hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
+        edit_file=optional_string(
+            metadata.get("edit_file"),
+            f"Step {title!r} edit_file",
+        ),
     )
 @
 
@@ -510,6 +588,29 @@ def test_load_tutorial_file_keeps_regular_code_fences_in_instructions(tmp_path):
     tutorial = load_tutorial_file(tutorial_path)
 
     assert tutorial.steps[0].instructions == "```bash\npwd\n```"
+
+
+def test_load_tutorial_file_parses_editor_step_metadata(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Edit a file\n\n"
+        "```tutorial-step\n"
+        "edit_file: notes.txt\n"
+        "required_patterns:\n"
+        "  - tutorial\n"
+        "```\n\n"
+        "Open `notes.txt` in your editor.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].edit_file == "notes.txt"
+    assert tutorial.steps[0].required_patterns == ("tutorial",)
 @
 
 
