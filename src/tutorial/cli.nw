@@ -478,9 +478,10 @@ def test_format_progress_status_includes_completed_step_count():
 \section{Rendering the tutorial list}
 
 The same command serves two audiences.  At an interactive terminal, Rich
-can format a readable table.  In pipelines, though, plain tab-separated
-rows are easier to parse, so the non-TTY form omits headers and writes one
-row per tutorial.
+can align the columns without the box-drawing borders that would add visual
+noise to a short list.  In pipelines, though, plain tab-separated rows are
+easier to parse, so the non-TTY form omits headers and writes one row per
+tutorial.
 
 <<functions>>=
 def render_tutorial_list(
@@ -490,7 +491,7 @@ def render_tutorial_list(
     """Render the tutorial list for terminals and scripts."""
 
     if console.is_terminal:
-        table = Table()
+        table = Table(box=None)
         table.add_column("Tutorial", style="bold")
         table.add_column("Progress", no_wrap=True)
         table.add_column("Summary")
@@ -588,6 +589,8 @@ def test_render_tutorial_list_uses_rich_table_in_tty():
     assert "shell-basics" in output
     assert "1/3 complete" in output
     assert "A short summary." in output
+    assert "┏" not in output
+    assert "│" not in output
 @
 
 
