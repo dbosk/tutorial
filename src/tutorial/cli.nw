@@ -28,6 +28,7 @@ app = create_app(tutorial_paths=standalone_tutorial_paths())
 """Tests for the CLI helpers."""
 
 import argparse
+import csv
 from pathlib import Path
 from io import StringIO
 
@@ -39,6 +40,7 @@ from typer.testing import CliRunner
 
 from tutorial.cli import *
 from tutorial.model import StepTranscript
+from tutorial.model import Tutorial
 from tutorial.run import write_demo_tutorial
 from tutorial.shell import EditorResult
 from tutorial.shell import run_scripted_shell
@@ -57,15 +59,19 @@ while tutorial state changes stay inside the runner.
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 from pathlib import Path
 from typing import Annotated
 from typing import Callable
 
+import platformdirs
 from tutorial.catalog import TutorialCatalog
 from tutorial.catalog import builtin_tutorial_paths
 from tutorial.catalog import universal_tutorial_path
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.table import Table
 import typer
 
 from tutorial.run import RunResult
@@ -201,38 +207,387 @@ def test_require_tutorial_paths_rejects_empty_configuration():
 @
 
 
-\section{Formatting progress lines}
+\section{Locating saved state without side effects}
 
-The list command should be scannable.  One line per tutorial is enough if
-we include both the tutorial ID and its current progress summary.
+Shell completion should not create directories just because the user hit
+tab.  The normal [[StateStore]] constructor eagerly creates its storage
+tree, so completion uses a small read-only helper that mirrors the same
+root-selection logic.
 
 <<functions>>=
-def format_progress_line(title: str, progress: ProgressState, summary: str) -> str:
-    """Return one display line for the list command."""
+def state_root_path(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+) -> Path:
+    """Return the state root for one CLI host without creating it."""
+
+    if state_root is not None:
+        return Path(state_root)
+    return (
+        platformdirs.user_state_path(
+            "tutorial",
+            appauthor=False,
+            ensure_exists=False,
+        )
+        / namespace
+    )
+@
+
+
+\section{Reading saved tutorial state}
+
+Review completions should reflect what is actually saved, not only what
+is present in the current catalog.  We therefore read tutorial and run
+identifiers straight from the JSON files.
+
+<<functions>>=
+def saved_tutorial_ids(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Return tutorial IDs that already have saved runs."""
+
+    runs_dir = state_root_path(
+        namespace=namespace,
+        state_root=state_root,
+    ) / "runs"
+    if not runs_dir.exists():
+        return ()
+    return tuple(
+        path.stem
+        for path in sorted(runs_dir.glob("*.json"))
+        if path.is_file()
+    )
+@
+
+<<functions>>=
+def saved_run_ids(
+    tutorial_id: str,
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Return saved run IDs for ``tutorial_id``."""
+
+    path = (
+        state_root_path(
+            namespace=namespace,
+            state_root=state_root,
+        )
+        / "runs"
+        / f"{tutorial_id}.json"
+    )
+    if not path.exists():
+        return ()
+
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ()
+
+    run_ids = []
+    for item in payload.get("runs", []):
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id")
+        if isinstance(run_id, str):
+            run_ids.append(run_id)
+    return tuple(run_ids)
+@
+
+
+\section{Completing tutorial and run identifiers}
+
+The run command should complete the tutorials that are currently loadable.
+Review is different: it should complete only saved tutorial and run
+identifiers, because those are the values the command can actually open.
+
+<<functions>>=
+def matching_completion_values(
+    values: tuple[str, ...],
+    incomplete: str,
+) -> list[str]:
+    """Return unique completion candidates that match ``incomplete``."""
+
+    matches = []
+    seen = set()
+    for value in values:
+        if not value.startswith(incomplete) or value in seen:
+            continue
+        seen.add(value)
+        matches.append(value)
+    return matches
+@
+
+<<functions>>=
+def tutorial_ids_from_paths(
+    tutorial_paths: tuple[str | Path, ...],
+) -> tuple[str, ...]:
+    """Return tutorial IDs loadable from ``tutorial_paths``."""
+
+    if not tutorial_paths:
+        return ()
+
+    try:
+        return tuple(
+            tutorial.id
+            for tutorial in TutorialCatalog(tutorial_paths).get_tutorials()
+        )
+    except ValueError:
+        return ()
+@
+
+<<functions>>=
+def suggest_run_tutorial_ids(
+    configured_paths: tuple[str | Path, ...],
+    command_paths: tuple[str | Path, ...],
+    incomplete: str,
+) -> list[str]:
+    """Return tutorial ID completions for the run command."""
+
+    return matching_completion_values(
+        tutorial_ids_from_paths(
+            effective_tutorial_paths(configured_paths, command_paths)
+        ),
+        incomplete,
+    )
+@
+
+<<functions>>=
+def suggest_review_tutorial_ids(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    incomplete: str,
+) -> list[str]:
+    """Return tutorial ID completions for the review command."""
+
+    return matching_completion_values(
+        saved_tutorial_ids(
+            namespace=namespace,
+            state_root=state_root,
+        ),
+        incomplete,
+    )
+@
+
+<<functions>>=
+def suggest_review_run_ids(
+    tutorial_id: str,
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    incomplete: str,
+) -> list[str]:
+    """Return run ID completions for one saved tutorial."""
+
+    return matching_completion_values(
+        saved_run_ids(
+            tutorial_id,
+            namespace=namespace,
+            state_root=state_root,
+        ),
+        incomplete,
+    )
+@
+
+Let's verify that completion follows the command's real data sources.
+
+<<test functions>>=
+def test_suggest_run_tutorial_ids_uses_command_paths(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+
+    assert suggest_run_tutorial_ids((), (tutorial_path,), "she") == [
+        "shell-basics"
+    ]
+
+
+def test_suggest_run_tutorial_ids_uses_embedded_paths(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+
+    assert suggest_run_tutorial_ids(
+        embedded_tutorial_paths((tutorial_path,)),
+        (),
+        "us",
+    ) == ["using-tutorials"]
+
+
+def test_suggest_review_tutorial_ids_uses_saved_runs(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+    store = StateStore(tmp_path / "state")
+    store.start_run(tutorial)
+
+    assert suggest_review_tutorial_ids(
+        state_root=tmp_path / "state",
+        incomplete="she",
+    ) == ["shell-basics"]
+
+
+def test_suggest_review_run_ids_uses_saved_runs(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+    store = StateStore(tmp_path / "state")
+    run = store.start_run(tutorial)
+
+    assert suggest_review_run_ids(
+        "shell-basics",
+        state_root=tmp_path / "state",
+        incomplete=run.run_id[:8],
+    ) == [run.run_id]
+@
+
+
+\section{Formatting progress summaries}
+
+The list output needs the same status wording whether we render a Rich
+table for a terminal or tab-separated rows for a script.
+
+<<functions>>=
+def format_progress_status(progress: ProgressState) -> str:
+    """Return a short status label for list output."""
 
     status = (
         "completed"
         if progress.finished
         else f"{progress.completed_steps}/{progress.total_steps} complete"
     )
-    return f"{title}: {status} - {summary}"
+    return status
 @
 
+
+Let's verify that unfinished tutorials show both counts.
+
 <<test functions>>=
-def test_format_progress_line_includes_status_and_summary():
-    line = format_progress_line(
-        "shell-basics",
+def test_format_progress_status_includes_completed_step_count():
+    status = format_progress_status(
         ProgressState(
             tutorial_id="shell-basics",
             total_steps=3,
             completed_steps=1,
             finished=False,
         ),
-        "A short summary.",
     )
 
-    assert "1/3 complete" in line
-    assert "A short summary." in line
+    assert status == "1/3 complete"
+@
+
+
+\section{Rendering the tutorial list}
+
+The same command serves two audiences.  At an interactive terminal, Rich
+can format a readable table.  In pipelines, though, plain tab-separated
+rows are easier to parse, so the non-TTY form omits headers and writes one
+row per tutorial.
+
+<<functions>>=
+def render_tutorial_list(
+    console: Console,
+    tutorials: tuple[tuple["Tutorial", ProgressState], ...],
+) -> None:
+    """Render the tutorial list for terminals and scripts."""
+
+    if console.is_terminal:
+        table = Table()
+        table.add_column("Tutorial", style="bold")
+        table.add_column("Progress", no_wrap=True)
+        table.add_column("Summary")
+        for tutorial, progress in tutorials:
+            table.add_row(
+                tutorial.id,
+                format_progress_status(progress),
+                tutorial.summary,
+            )
+        console.print(table)
+        return
+
+    writer = csv.writer(
+        console.file,
+        dialect="excel-tab",
+        lineterminator="\n",
+    )
+    for tutorial, progress in tutorials:
+        writer.writerow(
+            (
+                tutorial.id,
+                format_progress_status(progress),
+                tutorial.summary,
+            )
+        )
+@
+
+<<test functions>>=
+def test_render_tutorial_list_writes_tabs_when_not_in_tty():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_tutorial_list(
+        console,
+        (
+            (
+                Tutorial(
+                    id="shell-basics",
+                    title="Shell Basics",
+                    summary="A short summary.",
+                    steps=(),
+                ),
+                ProgressState(
+                    tutorial_id="shell-basics",
+                    total_steps=3,
+                    completed_steps=1,
+                    finished=False,
+                ),
+            ),
+        ),
+    )
+
+    assert buffer.getvalue() == (
+        "shell-basics\t1/3 complete\tA short summary.\n"
+    )
+@
+
+<<test functions>>=
+def test_render_tutorial_list_uses_rich_table_in_tty():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=True,
+        color_system=None,
+    )
+
+    render_tutorial_list(
+        console,
+        (
+            (
+                Tutorial(
+                    id="shell-basics",
+                    title="Shell Basics",
+                    summary="A short summary.",
+                    steps=(),
+                ),
+                ProgressState(
+                    tutorial_id="shell-basics",
+                    total_steps=3,
+                    completed_steps=1,
+                    finished=False,
+                ),
+            ),
+        ),
+    )
+
+    output = buffer.getvalue()
+    assert "Tutorial" in output
+    assert "shell-basics" in output
+    assert "1/3 complete" in output
+    assert "A short summary." in output
 @
 
 
@@ -971,6 +1326,32 @@ def create_app(
             allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
         )
 
+    def run_tutorial_id_completion(ctx, incomplete: str) -> list[str]:
+        command_paths = tuple(ctx.params.get("tutorial_path") or ())
+        return suggest_run_tutorial_ids(
+            tutorial_paths,
+            command_paths,
+            incomplete,
+        )
+
+    def review_tutorial_id_completion(incomplete: str) -> list[str]:
+        return suggest_review_tutorial_ids(
+            namespace=namespace,
+            state_root=state_root,
+            incomplete=incomplete,
+        )
+
+    def review_run_id_completion(ctx, incomplete: str) -> list[str]:
+        tutorial_id = ctx.params.get("tutorial_id")
+        if not isinstance(tutorial_id, str):
+            return []
+        return suggest_review_run_ids(
+            tutorial_id,
+            namespace=namespace,
+            state_root=state_root,
+            incomplete=incomplete,
+        )
+
     @application.command("list")
     def list_command(
         tutorial_path: Annotated[
@@ -986,6 +1367,7 @@ def create_app(
     ) -> None:
         """List the loaded tutorials and their saved progress."""
 
+        console = Console()
         try:
             tutorial_runner = runner(
                 command_tutorial_paths=tuple(tutorial_path or ()),
@@ -995,14 +1377,14 @@ def create_app(
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1)
 
-        for tutorial, progress in tutorial_runner.list_tutorials():
-            typer.echo(
-                format_progress_line(tutorial.id, progress, tutorial.summary)
-            )
+        render_tutorial_list(console, tutorial_runner.list_tutorials())
 
     @application.command("run")
     def run_command(
-        tutorial_id: str,
+        tutorial_id: str = typer.Argument(
+            ...,
+            autocompletion=run_tutorial_id_completion,
+        ),
         tutorial_path: Annotated[
             list[Path] | None,
             typer.Option(
@@ -1082,7 +1464,10 @@ def create_app(
 
     @application.command("review")
     def review_command(
-        tutorial_id: str,
+        tutorial_id: str = typer.Argument(
+            ...,
+            autocompletion=review_tutorial_id_completion,
+        ),
         step: Annotated[
             int | None,
             typer.Option(
@@ -1091,13 +1476,12 @@ def create_app(
                 help="Review only the latest transcript for one step.",
             ),
         ] = None,
-        run_id: Annotated[
-            str | None,
-            typer.Option(
-                "--run-id",
-                help="Review a specific saved run instead of the latest one.",
-            ),
-        ] = None,
+        run_id: str | None = typer.Option(
+            None,
+            "--run-id",
+            help="Review a specific saved run instead of the latest one.",
+            autocompletion=review_run_id_completion,
+        ),
     ) -> None:
         """Review saved transcripts for one tutorial."""
 
@@ -1138,7 +1522,7 @@ def test_list_command_shows_shell_basics(tmp_path):
     )
 
     assert result.exit_code == 0
-    assert "shell-basics" in result.stdout
+    assert "shell-basics\t" in result.stdout
 
 
 def test_standalone_app_lists_packaged_builtins_without_tutorial_path(tmp_path):
@@ -1152,9 +1536,10 @@ def test_standalone_app_lists_packaged_builtins_without_tutorial_path(tmp_path):
     )
 
     assert result.exit_code == 0
-    assert "using-tutorials" in result.stdout
-    assert "shell-basics" in result.stdout
-    assert "writing-tutorials" in result.stdout
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines[0].startswith("using-tutorials\t")
+    assert any(line.startswith("shell-basics\t") for line in lines[1:])
+    assert any(line.startswith("writing-tutorials\t") for line in lines[1:])
 
 
 def test_review_command_shows_saved_transcript(tmp_path):
@@ -1335,7 +1720,7 @@ def test_add_typer_subcommand_registers_tutorial_namespace(tmp_path):
     )
 
     assert result.exit_code == 0
-    assert "shell-basics" in result.stdout
+    assert "shell-basics\t" in result.stdout
 
 
 def test_add_typer_subcommand_prepends_universal_tutorial(tmp_path):
@@ -1352,8 +1737,8 @@ def test_add_typer_subcommand_prepends_universal_tutorial(tmp_path):
 
     assert result.exit_code == 0
     lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines[0].startswith("using-tutorials:")
-    assert any(line.startswith("shell-basics:") for line in lines[1:])
+    assert lines[0].startswith("using-tutorials\t")
+    assert any(line.startswith("shell-basics\t") for line in lines[1:])
 @
 
 
@@ -1460,7 +1845,7 @@ def test_add_argparse_subcommand_creates_dispatchable_handler(tmp_path, capsys):
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "shell-basics" in captured.out
+    assert "shell-basics\t" in captured.out
 
 
 def test_add_argparse_subcommand_prepends_universal_tutorial(tmp_path, capsys):
@@ -1480,8 +1865,8 @@ def test_add_argparse_subcommand_prepends_universal_tutorial(tmp_path, capsys):
 
     assert exit_code == 0
     lines = [line for line in captured.out.splitlines() if line.strip()]
-    assert lines[0].startswith("using-tutorials:")
-    assert any(line.startswith("shell-basics:") for line in lines[1:])
+    assert lines[0].startswith("using-tutorials\t")
+    assert any(line.startswith("shell-basics\t") for line in lines[1:])
 @
 
 
@@ -1535,8 +1920,8 @@ def argparse_list_command(
     except (RuntimeError, ValueError) as error:
         print(error)
         return 1
-    for tutorial, progress in runner.list_tutorials():
-        print(format_progress_line(tutorial.id, progress, tutorial.summary))
+
+    render_tutorial_list(Console(), runner.list_tutorials())
     return 0
 @
 
