@@ -61,9 +61,10 @@ format in the first release.
 
 We support two complementary checks:
 \begin{description}
-\item[Recorded-text patterns] small strings that should appear in the
-  saved text for the step, whether that text came from a shell session or
-  from an edited file.
+\item[Recorded-text patterns] small checks that should match the saved
+  text for the step, whether that text came from a shell session or from
+  an edited file.  Most are still plain strings, but some steps may need
+  an explicit regular expression.
 \item[Shell checks] a shell command that must succeed in the step
   workspace.
 \end{description}
@@ -72,6 +73,25 @@ The combination stays simple but covers the first release well.  Some
 steps are best recognised from what the student typed, while others are
 best recognised from the files they created.
 
+Plain strings remain the default because they are easy to author and read.
+The runner can still treat those strings a little more forgivingly than a
+raw byte-for-byte substring check by collapsing whitespace and removing
+shell control noise.  That avoids brittle failures from harmless prompt or
+completion variations while keeping the tutorial authoring format small.
+
+When a step genuinely needs more control, we also allow an explicit match
+mode in the form of a small mapping.  That keeps regular expressions
+available without forcing every tutorial author to write them.
+
+<<classes>>=
+@dataclass(frozen=True)
+class TextMatch:
+    """One recorded-text check for a tutorial step."""
+
+    pattern: str
+    mode: str = "contains"
+@
+
 <<classes>>=
 @dataclass(frozen=True)
 class TutorialStep:
@@ -79,7 +99,7 @@ class TutorialStep:
 
     title: str
     instructions: str
-    required_patterns: tuple[str, ...] = ()
+    required_patterns: tuple[TextMatch, ...] = ()
     check_command: str | None = None
     hint: str | None = None
     edit_file: str | None = None
@@ -93,11 +113,11 @@ def test_tutorial_step_keeps_validation_rules():
     step = TutorialStep(
         title="Create a file",
         instructions="Create notes.txt.",
-        required_patterns=("notes.txt",),
+        required_patterns=(TextMatch("notes.txt"),),
         check_command="test -f notes.txt",
     )
 
-    assert step.required_patterns == ("notes.txt",)
+    assert step.required_patterns == (TextMatch("notes.txt"),)
     assert step.check_command == "test -f notes.txt"
 
 

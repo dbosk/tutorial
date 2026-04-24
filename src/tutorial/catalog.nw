@@ -56,6 +56,7 @@ from pathlib import Path
 
 import yaml
 
+from tutorial.model import TextMatch
 from tutorial.model import Tutorial
 from tutorial.model import TutorialStep
 @
@@ -503,10 +504,15 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
 \section{Building one tutorial step}
 
 Once the optional metadata block is separated from the Markdown body, the
-remaining conversion is a straightforward mapping onto [[TutorialStep]].
-The only interaction-specific field is [[edit_file]], which tells the
-runner to open that workspace-relative path in an editor instead of
-launching a shell for the step.
+remaining conversion is still mostly a straightforward mapping onto
+[[TutorialStep]].  The only interaction-specific field is [[edit_file]],
+which tells the runner to open that workspace-relative path in an editor
+instead of launching a shell for the step.
+
+The recorded-text checks are slightly richer.  Tutorials may still use a
+simple YAML list of strings, but each item can also be a small mapping with
+an explicit match mode.  That keeps common cases short while leaving room
+for regular expressions when a step genuinely needs them.
 
 <<functions>>=
 def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
@@ -524,7 +530,7 @@ def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
     return TutorialStep(
         title=title,
         instructions=instructions,
-        required_patterns=string_tuple(
+        required_patterns=text_match_tuple(
             metadata.get("required_patterns"),
             f"Step {title!r} required_patterns",
         ),
@@ -564,10 +570,35 @@ def test_load_tutorial_file_parses_step_metadata_block(tmp_path):
 
     tutorial = load_tutorial_file(tutorial_path)
 
-    assert tutorial.steps[0].required_patterns == ("pwd",)
+    assert tutorial.steps[0].required_patterns == (TextMatch("pwd"),)
     assert tutorial.steps[0].check_command == "test -f notes.txt"
     assert tutorial.steps[0].hint == "Try pwd first."
     assert tutorial.steps[0].instructions == "Run `pwd`."
+@
+
+<<test functions>>=
+def test_load_tutorial_file_parses_explicit_regex_patterns(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - mode: regex\n"
+        "    pattern: ^pwd(?:\\\\s+)?$\n"
+        "```\n\n"
+        "Run `pwd`.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].required_patterns == (
+        TextMatch("^pwd(?:\\\\s+)?$", mode="regex"),
+    )
 @
 
 <<test functions>>=
@@ -610,7 +641,7 @@ def test_load_tutorial_file_parses_editor_step_metadata(tmp_path):
     tutorial = load_tutorial_file(tutorial_path)
 
     assert tutorial.steps[0].edit_file == "notes.txt"
-    assert tutorial.steps[0].required_patterns == ("tutorial",)
+    assert tutorial.steps[0].required_patterns == (TextMatch("tutorial"),)
 @
 
 
@@ -665,20 +696,42 @@ def optional_string(value: object, context: str) -> str | None:
 @
 
 <<functions>>=
-def string_tuple(value: object, context: str) -> tuple[str, ...]:
-    """Return ``value`` as a tuple of strings."""
+def text_match(value: object, context: str) -> TextMatch:
+    """Return one recorded-text match from tutorial metadata."""
+
+    if isinstance(value, str):
+        if not value:
+            raise ValueError(f"{context} must only contain non-empty strings.")
+        return TextMatch(value)
+
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{context} items must be strings or mappings with mode/pattern."
+        )
+
+    reject_unknown_keys(value, {"mode", "pattern"}, context)
+    mode = require_string(value, "mode", context)
+    pattern = require_string(value, "pattern", context)
+    if mode not in {"contains", "regex"}:
+        raise ValueError(f"{context} mode must be 'contains' or 'regex'.")
+    return TextMatch(pattern=pattern, mode=mode)
+@
+
+<<functions>>=
+def text_match_tuple(value: object, context: str) -> tuple[TextMatch, ...]:
+    """Return ``value`` as a tuple of recorded-text matches."""
 
     if value is None:
         return ()
     if not isinstance(value, list):
-        raise ValueError(f"{context} must be a YAML list of strings.")
+        raise ValueError(
+            f"{context} must be a YAML list of strings or match mappings."
+        )
 
-    items = []
-    for item in value:
-        if not isinstance(item, str) or not item:
-            raise ValueError(f"{context} must only contain non-empty strings.")
-        items.append(item)
-    return tuple(items)
+    return tuple(
+        text_match(item, f"{context} item")
+        for item in value
+    )
 @
 
 

@@ -23,6 +23,7 @@ __all__ = [
     "RunResult",
     "StateStore",
     "StepTranscript",
+    "TextMatch",
     "Tutorial",
     "TutorialCatalog",
     "TutorialRun",
@@ -63,6 +64,7 @@ from tutorial.catalog import TutorialCatalog
 from tutorial.catalog import get_tutorial
 from tutorial.catalog import get_tutorials
 from tutorial.model import StepTranscript
+from tutorial.model import TextMatch
 from tutorial.model import Tutorial
 from tutorial.model import TutorialRun
 from tutorial.model import TutorialStep

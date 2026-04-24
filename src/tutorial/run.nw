@@ -23,6 +23,7 @@ We keep the policy intentionally narrow for v1:
 <<imports>>
 
 <<classes>>
+<<constants>>
 <<functions>>
 @
 
@@ -57,6 +58,7 @@ parsing out of the execution path itself.
 from __future__ import annotations
 
 import inspect
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +66,7 @@ from typing import Callable
 
 from tutorial.catalog import TutorialCatalog
 from tutorial.model import StepTranscript
+from tutorial.model import TextMatch
 from tutorial.model import Tutorial
 from tutorial.model import TutorialRun
 from tutorial.model import TutorialStep
@@ -1056,7 +1059,7 @@ def test_validate_step_requires_both_transcript_and_file_state(tmp_path):
     step = TutorialStep(
         title="Create note",
         instructions="Do it.",
-        required_patterns=("cat notes.txt",),
+        required_patterns=(TextMatch("cat notes.txt"),),
         check_command="test -f notes.txt",
     )
     (tmp_path / "notes.txt").write_text("tutorial\n")
@@ -1078,7 +1081,7 @@ def test_validate_step_accepts_editor_text_patterns(tmp_path):
     step = TutorialStep(
         title="Edit note",
         instructions="Do it.",
-        required_patterns=("tutorial",),
+        required_patterns=(TextMatch("tutorial"),),
         check_command="grep -q tutorial notes.txt",
         edit_file="notes.txt",
     )
@@ -1090,18 +1093,57 @@ def test_validate_step_accepts_editor_text_patterns(tmp_path):
 
 \section{Checking transcript patterns}
 
-Transcript checks are intentionally literal.  The goal is not to parse a
-shell language but to recognise that the expected command or output
-appeared in the recorded session.
+Transcript checks still default to literal matching, but interactive shell
+transcripts contain noise that students do not control: carriage returns,
+ANSI control sequences, and small whitespace differences from completion or
+line editing.  We therefore normalise those details before checking plain
+string patterns.  Tutorials that truly need more control can opt into an
+explicit regular expression.
+
+<<constants>>=
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+WHITESPACE_RE = re.compile(r"\s+")
+@
+
+<<functions>>=
+def normalise_recorded_text(text: str) -> str:
+    """Return ``text`` without terminal control noise."""
+
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = text.replace("\r", "\n")
+    return text
+@
+
+<<functions>>=
+def normalise_match_text(text: str) -> str:
+    """Return ``text`` with collapsed whitespace for tolerant matching."""
+
+    normalised = normalise_recorded_text(text)
+    return WHITESPACE_RE.sub(" ", normalised).strip()
+@
+
+<<functions>>=
+def transcript_matches_pattern(transcript: str, pattern: TextMatch) -> bool:
+    """Return whether one recorded-text check matches ``transcript``."""
+
+    if pattern.mode == "regex":
+        return re.search(pattern.pattern, normalise_recorded_text(transcript)) is not None
+    if pattern.mode == "contains":
+        return normalise_match_text(pattern.pattern) in normalise_match_text(transcript)
+    raise ValueError(f"Unsupported text match mode: {pattern.mode!r}")
+@
 
 <<functions>>=
 def transcript_matches_patterns(
     transcript: str,
-    patterns: tuple[str, ...],
+    patterns: tuple[TextMatch, ...],
 ) -> bool:
     """Return whether all required transcript patterns are present."""
 
-    return all(pattern in transcript for pattern in patterns)
+    return all(
+        transcript_matches_pattern(transcript, pattern)
+        for pattern in patterns
+    )
 @
 
 <<test functions>>=
@@ -1110,8 +1152,36 @@ def test_transcript_matches_patterns_accepts_empty_requirements():
 
 
 def test_transcript_matches_patterns_requires_all_patterns():
-    assert transcript_matches_patterns("pwd\nls\n", ("pwd", "ls")) is True
-    assert transcript_matches_patterns("pwd\n", ("pwd", "ls")) is False
+    assert transcript_matches_patterns(
+        "pwd\nls\n",
+        (TextMatch("pwd"), TextMatch("ls")),
+    ) is True
+    assert transcript_matches_patterns(
+        "pwd\n",
+        (TextMatch("pwd"), TextMatch("ls")),
+    ) is False
+@
+
+<<test functions>>=
+def test_transcript_matches_patterns_tolerates_whitespace_variation():
+    assert transcript_matches_patterns(
+        "tutorial run --restart shell-basics   \n",
+        (TextMatch("tutorial run --restart shell-basics"),),
+    ) is True
+
+
+def test_transcript_matches_patterns_ignores_ansi_control_sequences():
+    assert transcript_matches_patterns(
+        "\x1b[1mshell-basics $ \x1b[0mpwd\n",
+        (TextMatch("shell-basics $"),),
+    ) is True
+
+
+def test_transcript_matches_patterns_can_use_regex_mode():
+    assert transcript_matches_patterns(
+        "tutorial run --restart shell-basics   \n",
+        (TextMatch(r"tutorial run --restart shell-basics\s*", mode="regex"),),
+    ) is True
 @
 
 
