@@ -1,0 +1,738 @@
+\chapter{Persistent State}
+\label{tutorial-state}
+
+Running a tutorial once is not enough.  The command also needs to know
+whether the student is resuming, whether a finished tutorial should stay
+finished until an explicit restart, and where the step workspace lives.
+
+We therefore store the run history on disk in a simple JSON format.  The
+format is intentionally transparent so that an embedded host or a human
+debugging the tool can inspect it without special utilities.
+
+
+\section{Code overview}
+
+<<[[state.py]]>>=
+"""Persistent storage for tutorial progress and transcripts."""
+
+<<imports>>
+
+<<classes>>
+<<functions>>
+@
+
+<<test [[state.py]]>>=
+"""Tests for persistent tutorial state."""
+
+from pathlib import Path
+
+from tutorial.model import StepTranscript
+from tutorial.model import Tutorial
+from tutorial.model import TutorialRun
+from tutorial.model import TutorialStep
+from tutorial.state import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+We store plain JSON because the records are small and debugging a broken
+resume flow is easier when the file is readable with ordinary tools.
+
+<<imports>>=
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import asdict
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+
+import platformdirs
+
+from tutorial.model import StepTranscript
+from tutorial.model import Tutorial
+from tutorial.model import TutorialRun
+@
+
+
+\section{Summarising progress}
+
+The command-line interface does not need the full run history every time.
+It mainly needs to know how far the student has come and where the active
+workspace lives.  [[ProgressState]] is that compact summary.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ProgressState:
+    """Compact progress summary for one tutorial."""
+
+    tutorial_id: str
+    total_steps: int
+    completed_steps: int
+    finished: bool
+    run_id: str | None = None
+    workspace: str | None = None
+    updated_at: str | None = None
+@
+
+Let's verify that the summary can represent an untouched tutorial.
+
+<<test functions>>=
+def test_progress_state_can_represent_no_run_yet():
+    progress = ProgressState(
+        tutorial_id="demo",
+        total_steps=3,
+        completed_steps=0,
+        finished=False,
+    )
+
+    assert progress.run_id is None
+    assert progress.workspace is None
+@
+
+
+\section{The state store}
+
+The store separates two concerns:
+\begin{description}
+\item[Run records] JSON files under [[runs/]], one file per tutorial ID.
+\item[Workspaces] persistent directories under [[workspaces/]], one
+  directory per run.
+\end{description}
+
+This split keeps the bookkeeping files small while still giving each run
+its own durable shell workspace.
+
+<<classes>>=
+class StateStore:
+    """Store tutorial runs and workspaces on disk."""
+
+    <<state store methods>>
+@
+
+
+\subsection{Initialising the store}
+
+Embedded use matters here.  A standalone [[tutorial]] command should not
+collide with a host application's built-in tutorials, so the store keeps
+one namespace directory per host.
+
+<<state store methods>>=
+def __init__(
+    self,
+    root_dir: str | Path | None = None,
+    *,
+    namespace: str = "tutorial",
+):
+    """Initialise a state store for one host namespace."""
+
+    if root_dir is None:
+        base_dir = platformdirs.user_state_path(
+            "tutorial",
+            appauthor=False,
+            ensure_exists=True,
+        )
+        self.root_dir = Path(base_dir) / namespace
+    else:
+        self.root_dir = Path(root_dir)
+
+    self.namespace = namespace
+    self.runs_dir = self.root_dir / "runs"
+    self.workspaces_dir = self.root_dir / "workspaces"
+    self.runs_dir.mkdir(parents=True, exist_ok=True)
+    self.workspaces_dir.mkdir(parents=True, exist_ok=True)
+@
+
+<<test functions>>=
+def test_state_store_creates_runs_and_workspaces_dirs(tmp_path):
+    store = StateStore(tmp_path)
+
+    assert store.runs_dir.is_dir()
+    assert store.workspaces_dir.is_dir()
+@
+
+
+\subsection{Locating the JSON file for one tutorial}
+
+Each tutorial gets its own JSON file so that one broken record does not
+block the rest of the registry.
+
+<<state store methods>>=
+def state_path(self, tutorial_id: str) -> Path:
+    """Return the JSON file that stores runs for ``tutorial_id``."""
+
+    return self.runs_dir / f"{tutorial_id}.json"
+@
+
+<<test functions>>=
+def test_state_path_uses_tutorial_id(tmp_path):
+    store = StateStore(tmp_path)
+
+    assert store.state_path("shell-basics") == (
+        tmp_path / "runs" / "shell-basics.json"
+    )
+@
+
+
+\subsection{Locating the workspace for one run}
+
+Runs keep their workspaces after the shell exits so later steps and the
+review command can inspect the same files.
+
+<<state store methods>>=
+def workspace_path(self, tutorial_id: str, run_id: str) -> Path:
+    """Return the workspace directory for one run."""
+
+    return self.workspaces_dir / tutorial_id / run_id
+@
+
+<<test functions>>=
+def test_workspace_path_is_nested_by_tutorial_and_run(tmp_path):
+    store = StateStore(tmp_path)
+
+    assert store.workspace_path("shell-basics", "run-1") == (
+        tmp_path / "workspaces" / "shell-basics" / "run-1"
+    )
+@
+
+
+\subsection{Loading stored runs}
+
+Missing state should behave like first use, not like an error.
+
+<<state store methods>>=
+def load_runs(self, tutorial_id: str) -> list[TutorialRun]:
+    """Load all recorded runs for ``tutorial_id``."""
+
+    path = self.state_path(tutorial_id)
+    if not path.exists():
+        return []
+
+    payload = json.loads(path.read_text())
+    return [run_from_dict(item) for item in payload.get("runs", [])]
+@
+
+<<test functions>>=
+def test_load_runs_returns_empty_list_for_missing_file(tmp_path):
+    store = StateStore(tmp_path)
+
+    assert store.load_runs("shell-basics") == []
+@
+
+
+\subsection{Saving runs}
+
+The JSON format mirrors the in-memory dataclasses closely.  That keeps
+the conversion layer small and makes the stored file easy to inspect.
+
+<<state store methods>>=
+def save_runs(self, tutorial_id: str, runs: list[TutorialRun]) -> None:
+    """Persist the given runs for ``tutorial_id``."""
+
+    path = self.state_path(tutorial_id)
+    payload = {
+        "tutorial_id": tutorial_id,
+        "runs": [asdict(run) for run in runs],
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+@
+
+<<test functions>>=
+def test_save_runs_writes_json_file(tmp_path):
+    store = StateStore(tmp_path)
+    run = TutorialRun(
+        tutorial_id="shell-basics",
+        run_id="run-1",
+        workspace="/tmp/work",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+    store.save_runs("shell-basics", [run])
+
+    assert '"run_id": "run-1"' in store.state_path("shell-basics").read_text()
+@
+
+
+\subsection{Looking up the latest run}
+
+Resume and review both care about the most recent run first, so we make
+that the default query.
+
+<<state store methods>>=
+def latest_run(self, tutorial_id: str) -> TutorialRun | None:
+    """Return the most recent recorded run for ``tutorial_id``."""
+
+    runs = self.load_runs(tutorial_id)
+    if not runs:
+        return None
+    return runs[-1]
+@
+
+<<test functions>>=
+def test_latest_run_returns_last_saved_run(tmp_path):
+    store = StateStore(tmp_path)
+    first = TutorialRun(
+        tutorial_id="shell-basics",
+        run_id="run-1",
+        workspace="/tmp/one",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    second = TutorialRun(
+        tutorial_id="shell-basics",
+        run_id="run-2",
+        workspace="/tmp/two",
+        started_at="2026-01-01T00:01:00+00:00",
+        updated_at="2026-01-01T00:01:00+00:00",
+    )
+
+    store.save_runs("shell-basics", [first, second])
+
+    assert store.latest_run("shell-basics").run_id == "run-2"
+@
+
+
+\subsection{Starting a new run}
+
+Starting a run allocates a fresh workspace immediately.  That matters for
+the CLI because the user should know exactly where the step shell will be
+started before the shell opens.
+
+We also copy the tutorial title and source metadata into the run record.
+That way review still has something human-readable to show even if the
+original Markdown file disappears later.
+
+<<state store methods>>=
+def start_run(self, tutorial: Tutorial) -> TutorialRun:
+    """Create and persist a fresh run for ``tutorial``."""
+
+    created_at = utc_now()
+    run_id = build_run_id()
+    workspace = self.workspace_path(tutorial.id, run_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    run = TutorialRun(
+        tutorial_id=tutorial.id,
+        tutorial_title=tutorial.title,
+        run_id=run_id,
+        workspace=str(workspace),
+        started_at=created_at,
+        updated_at=created_at,
+        tutorial_source_path=tutorial.source_path,
+        tutorial_source_digest=tutorial.source_digest,
+    )
+
+    runs = self.load_runs(tutorial.id)
+    runs.append(run)
+    self.save_runs(tutorial.id, runs)
+    return run
+@
+
+<<test functions>>=
+def test_start_run_creates_workspace_and_persists_run(tmp_path):
+    store = StateStore(tmp_path)
+    tutorial = Tutorial(
+        id="shell-basics",
+        title="Shell Basics",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+        source_path="/tmp/shell-basics.md",
+        source_digest="digest",
+    )
+
+    run = store.start_run(tutorial)
+
+    assert Path(run.workspace).is_dir()
+    assert store.latest_run("shell-basics").run_id == run.run_id
+    assert store.latest_run("shell-basics").tutorial_title == "Shell Basics"
+@
+
+
+\subsection{Updating one run}
+
+Each completed step appends another transcript to the latest run, so the
+store needs an update path that replaces an existing run in-place.
+
+<<state store methods>>=
+def store_run(self, run: TutorialRun) -> None:
+    """Persist ``run``, replacing the existing record if present."""
+
+    runs = self.load_runs(run.tutorial_id)
+    for index, existing in enumerate(runs):
+        if existing.run_id == run.run_id:
+            runs[index] = run
+            break
+    else:
+        runs.append(run)
+
+    self.save_runs(run.tutorial_id, runs)
+@
+
+<<test functions>>=
+def test_store_run_replaces_existing_record(tmp_path):
+    store = StateStore(tmp_path)
+    tutorial = Tutorial(
+        id="shell-basics",
+        title="Shell Basics",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+    )
+    run = store.start_run(tutorial)
+    run.transcripts.append(
+        StepTranscript(
+            tutorial_id="shell-basics",
+            step_index=0,
+            title="Inspect",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="pwd\n",
+            passed=True,
+        )
+    )
+
+    store.store_run(run)
+
+    assert len(store.latest_run("shell-basics").transcripts) == 1
+@
+
+
+\subsection{Summarising one tutorial's progress}
+
+Progress should count the latest attempt for each step, not every
+attempt.  If a student fails step two and then retries it, the tutorial
+has still only completed one step until the latest attempt passes.
+
+<<state store methods>>=
+def progress_for(
+    self,
+    tutorial: Tutorial,
+    run: TutorialRun | None,
+) -> ProgressState:
+    """Return a compact progress summary for ``tutorial``."""
+
+    if run is None:
+        return ProgressState(
+            tutorial_id=tutorial.id,
+            total_steps=len(tutorial.steps),
+            completed_steps=0,
+            finished=False,
+        )
+
+    completed_steps = count_completed_steps(run)
+    return ProgressState(
+        tutorial_id=tutorial.id,
+        total_steps=len(tutorial.steps),
+        completed_steps=completed_steps,
+        finished=completed_steps >= len(tutorial.steps),
+        run_id=run.run_id,
+        workspace=run.workspace,
+        updated_at=run.updated_at,
+    )
+@
+
+<<test functions>>=
+def test_progress_for_counts_latest_passed_steps(tmp_path):
+    store = StateStore(tmp_path)
+    tutorial = Tutorial(
+        id="demo",
+        title="Demo",
+        summary="A demo tutorial.",
+        steps=(
+            TutorialStep(title="One", instructions="Do one."),
+            TutorialStep(title="Two", instructions="Do two."),
+        ),
+    )
+    run = TutorialRun(
+        tutorial_id="demo",
+        run_id="run-1",
+        workspace="/tmp/demo",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:02+00:00",
+        transcripts=[
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=0,
+                title="One",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript="ok",
+                passed=True,
+            ),
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=1,
+                title="Two",
+                started_at="2026-01-01T00:00:01+00:00",
+                ended_at="2026-01-01T00:00:02+00:00",
+                exit_status=1,
+                transcript="not yet",
+                passed=False,
+            ),
+        ],
+    )
+
+    progress = store.progress_for(tutorial, run)
+
+    assert progress.completed_steps == 1
+    assert progress.finished is False
+@
+
+
+\section{Creating stable timestamps}
+
+We keep timestamps in UTC ISO 8601 format so the files sort well and are
+easy to read regardless of the user's local timezone.
+
+<<functions>>=
+def utc_now() -> str:
+    """Return the current time as an ISO 8601 UTC string."""
+
+    return datetime.now(timezone.utc).isoformat()
+@
+
+<<test functions>>=
+def test_utc_now_returns_timezone_aware_string():
+    assert utc_now().endswith("+00:00")
+@
+
+
+\section{Creating run identifiers}
+
+Run identifiers should sort chronologically but also avoid collisions if
+two runs begin within the same second.
+
+<<functions>>=
+def build_run_id() -> str:
+    """Return a chronologically sortable run identifier."""
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{uuid.uuid4().hex[:8]}"
+@
+
+<<test functions>>=
+def test_build_run_id_contains_timestamp_and_suffix():
+    run_id = build_run_id()
+
+    assert "T" in run_id
+    assert "-" in run_id
+@
+
+
+\section{Restoring one transcript from JSON}
+
+The stored JSON mirrors the dataclass fields, so reconstruction is a
+straightforward call back into the dataclass constructor.
+
+<<functions>>=
+def transcript_from_dict(data: dict) -> StepTranscript:
+    """Restore a transcript record from JSON-compatible data."""
+
+    return StepTranscript(**data)
+@
+
+<<test functions>>=
+def test_transcript_from_dict_restores_passed_flag():
+    transcript = transcript_from_dict(
+        {
+            "tutorial_id": "demo",
+            "step_index": 0,
+            "title": "One",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "ended_at": "2026-01-01T00:00:01+00:00",
+            "exit_status": 0,
+            "transcript": "pwd",
+            "passed": True,
+        }
+    )
+
+    assert transcript.passed is True
+
+
+def test_transcript_from_dict_restores_edited_file_label():
+    transcript = transcript_from_dict(
+        {
+            "tutorial_id": "demo",
+            "step_index": 1,
+            "title": "Edit config",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "ended_at": "2026-01-01T00:00:01+00:00",
+            "exit_status": 0,
+            "transcript": "name=tutorial\n",
+            "passed": True,
+            "edited_file": "config.ini",
+        }
+    )
+
+    assert transcript.edited_file == "config.ini"
+@
+
+
+\section{Restoring one run from JSON}
+
+Runs contain nested transcripts, so we restore those first and then feed
+the result to the run dataclass.
+
+<<functions>>=
+def run_from_dict(data: dict) -> TutorialRun:
+    """Restore a run record from JSON-compatible data."""
+
+    payload = dict(data)
+    payload["transcripts"] = [
+        transcript_from_dict(item)
+        for item in payload.get("transcripts", [])
+    ]
+    return TutorialRun(**payload)
+@
+
+<<test functions>>=
+def test_run_from_dict_restores_nested_transcripts():
+    run = run_from_dict(
+        {
+            "tutorial_id": "demo",
+            "run_id": "run-1",
+            "workspace": "/tmp/demo",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "transcripts": [
+                {
+                    "tutorial_id": "demo",
+                    "step_index": 0,
+                    "title": "One",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "ended_at": "2026-01-01T00:00:01+00:00",
+                    "exit_status": 0,
+                    "transcript": "pwd",
+                    "passed": True,
+                }
+            ],
+        }
+    )
+
+    assert run.transcripts[0].title == "One"
+    assert run.transcripts[0].edited_file is None
+@
+
+
+\section{Selecting the latest transcript per step}
+
+Review wants the current story of a run rather than every failed attempt.
+We therefore collapse repeated attempts down to the latest transcript for
+each step index.
+
+<<functions>>=
+def latest_step_transcripts(run: TutorialRun) -> tuple[StepTranscript, ...]:
+    """Return the latest recorded transcript for each attempted step."""
+
+    latest = {}
+    for transcript in run.transcripts:
+        latest[transcript.step_index] = transcript
+
+    return tuple(latest[index] for index in sorted(latest))
+@
+
+<<test functions>>=
+def test_latest_step_transcripts_keeps_latest_attempt_only():
+    run = TutorialRun(
+        tutorial_id="demo",
+        run_id="run-1",
+        workspace="/tmp/demo",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:03+00:00",
+        transcripts=[
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=0,
+                title="One",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=1,
+                transcript="bad",
+                passed=False,
+            ),
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=0,
+                title="One",
+                started_at="2026-01-01T00:00:01+00:00",
+                ended_at="2026-01-01T00:00:02+00:00",
+                exit_status=0,
+                transcript="good",
+                passed=True,
+            ),
+        ],
+    )
+
+    latest = latest_step_transcripts(run)
+
+    assert len(latest) == 1
+    assert latest[0].transcript == "good"
+@
+
+
+\section{Counting completed steps}
+
+Tutorials advance in order, so completion is the number of contiguous
+steps from the start whose latest attempts passed.
+
+<<functions>>=
+def count_completed_steps(run: TutorialRun) -> int:
+    """Return the number of consecutively completed steps."""
+
+    latest = {transcript.step_index: transcript for transcript in run.transcripts}
+    completed = 0
+    while completed in latest and latest[completed].passed:
+        completed += 1
+    return completed
+@
+
+<<test functions>>=
+def test_count_completed_steps_uses_latest_attempts(tmp_path):
+    run = TutorialRun(
+        tutorial_id="demo",
+        run_id="run-1",
+        workspace=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:03+00:00",
+        transcripts=[
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=0,
+                title="One",
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript="one",
+                passed=True,
+            ),
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=1,
+                title="Two",
+                started_at="2026-01-01T00:00:01+00:00",
+                ended_at="2026-01-01T00:00:02+00:00",
+                exit_status=1,
+                transcript="fail",
+                passed=False,
+            ),
+            StepTranscript(
+                tutorial_id="demo",
+                step_index=1,
+                title="Two",
+                started_at="2026-01-01T00:00:02+00:00",
+                ended_at="2026-01-01T00:00:03+00:00",
+                exit_status=0,
+                transcript="pass",
+                passed=True,
+            ),
+        ],
+    )
+
+    assert count_completed_steps(run) == 2
+@

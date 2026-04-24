@@ -1,0 +1,10 @@
+tutorial.tex
+tutorial.pdf
+ltxobj/
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc

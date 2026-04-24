@@ -1,0 +1,735 @@
+\chapter{PTY Shell Sessions}
+\label{tutorial-shell}
+
+The central interaction problem is not menu rendering but shell control.
+Students need a real shell so they can type normal commands, create
+files, and inspect the workspace as they would in ordinary terminal use.
+
+We therefore use a PTY-backed bash shell.  The PTY gives us two things a
+plain subprocess does not: an interactive shell prompt and a transcript
+that reflects what actually appeared in the terminal.
+
+
+\section{Code overview}
+
+<<[[shell.py]]>>=
+"""PTY-backed shell sessions for tutorial steps."""
+
+<<imports>>
+
+<<classes>>
+<<constants>>
+<<functions>>
+@
+
+<<test [[shell.py]]>>=
+"""Tests for shell session helpers."""
+
+from pathlib import Path
+
+import pytest
+
+from tutorial.shell import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The shell backend stays in the standard library.  That keeps the first
+release easy to install and focuses the implementation effort on the PTY
+behaviour itself rather than on a higher-level UI framework.
+
+We also keep editor launching in the same module because it has the same
+terminal constraint as the interactive shell path: the child process must
+talk directly to the user's TTY rather than to a captured pipe.
+
+<<imports>>=
+from __future__ import annotations
+
+import errno
+import fcntl
+import os
+import pty
+import shlex
+import select
+import shutil
+import subprocess
+import sys
+import termios
+import tty
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+@
+
+
+\section{Capturing the result of one shell session}
+
+The runner only needs four facts from a completed session: when it
+started, when it ended, the shell's exit status, and the captured
+transcript.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ShellResult:
+    """Captured result of one shell session."""
+
+    started_at: str
+    ended_at: str
+    exit_status: int
+    transcript: str
+@
+
+<<classes>>=
+@dataclass(frozen=True)
+class EditorResult:
+    """Captured result of one editor session."""
+
+    started_at: str
+    ended_at: str
+    exit_status: int
+    file_path: str
+    text: str
+@
+
+Let's verify that the result object keeps the captured transcript text.
+
+<<test functions>>=
+def test_shell_result_stores_transcript_text():
+    result = ShellResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="pwd\r\n",
+    )
+
+    assert "pwd" in result.transcript
+
+
+def test_editor_result_stores_edited_text():
+    result = EditorResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        file_path="/tmp/demo/notes.txt",
+        text="tutorial\n",
+    )
+
+    assert result.file_path.endswith("notes.txt")
+    assert result.text == "tutorial\n"
+@
+
+
+\section{Creating shell timestamps}
+
+The shell module keeps its own UTC helper so it can be used without
+depending on the state layer.
+
+<<functions>>=
+def utc_now() -> str:
+    """Return the current time as an ISO 8601 UTC string."""
+
+    return datetime.now(timezone.utc).isoformat()
+@
+
+
+\section{Preparing the shell environment}
+
+We keep the prompt explicit so the transcript reads like a shell session
+when shown in the review command.  Nested tutorials should also expose
+their own names in the prompt, otherwise the inner shell is hard to tell
+apart from the outer one.
+
+Resetting [[PROMPT_COMMAND]] avoids host-specific shell hooks from
+polluting the transcript.
+
+<<functions>>=
+def build_shell_environment(
+    extra_env: dict[str, str] | None = None,
+    *,
+    prompt_name: str = "tutorial",
+) -> dict[str, str]:
+    """Return the environment used for tutorial shell sessions."""
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    env["PS1"] = f"{prompt_name} $ "
+    env["PROMPT_COMMAND"] = ""
+    env["TERM"] = env.get("TERM", "xterm-256color")
+    return env
+@
+
+<<test functions>>=
+def test_build_shell_environment_sets_prompt():
+    env = build_shell_environment(
+        {"EXTRA": "yes"},
+        prompt_name="using-tutorials",
+    )
+
+    assert env["PS1"] == "using-tutorials $ "
+    assert env["EXTRA"] == "yes"
+@
+
+
+\section{Resolving which editor to run}
+
+[[EDITOR]] often contains both a program name and flags such as
+[[code --wait]] or [[emacsclient -c]].  Splitting that value with
+[[shlex]] preserves the conventional shell-style configuration while
+still letting us append the target file path as a separate argument.
+
+When [[EDITOR]] is not set, we fall back to a short list of common
+interactive editors and pick the first one available on [[PATH]].
+
+<<constants>>=
+DEFAULT_EDITORS = ("vim", "vi", "nano")
+@
+
+<<functions>>=
+def resolve_editor_command(
+    env: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return the configured editor command as an argument tuple."""
+
+    environment = os.environ if env is None else env
+    editor = environment.get("EDITOR", "").strip()
+    if editor:
+        return tuple(shlex.split(editor))
+
+    for candidate in DEFAULT_EDITORS:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return (resolved,)
+
+    raise RuntimeError(
+        "No editor configured. Set $EDITOR or install vim, vi, or nano."
+    )
+@
+
+Let's verify that an explicit [[EDITOR]] value wins and that the fallback
+search returns the first available common editor.
+
+<<test functions>>=
+def test_resolve_editor_command_uses_editor_environment_variable():
+    assert resolve_editor_command({"EDITOR": "code --wait"}) == (
+        "code",
+        "--wait",
+    )
+
+
+def test_resolve_editor_command_falls_back_to_first_available_editor(monkeypatch):
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name == "vi" else None,
+    )
+
+    assert resolve_editor_command() == ("/usr/bin/vi",)
+@
+
+
+\section{Preparing one editable file}
+
+Editor-backed steps need a concrete file path before the editor opens.
+Creating parent directories here keeps the launch path small, and only
+writing initial contents when the file does not yet exist avoids clobbering
+work during retries or resumed runs.
+
+We also require the configured path to stay inside the workspace.  A
+tutorial may choose the file name, but it should not silently send the
+student's editor to an unrelated absolute path.
+
+<<functions>>=
+def workspace_relative_path(relative_path: str) -> Path:
+    """Return ``relative_path`` as a safe path below the workspace."""
+
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            "Editor steps require a relative path inside the workspace."
+        )
+    return path
+@
+
+<<functions>>=
+def prepare_editor_file(
+    *,
+    workspace: str | Path,
+    relative_path: str,
+    initial_text: str | None = None,
+) -> Path:
+    """Return the editable file path inside ``workspace``."""
+
+    file_path = Path(workspace) / workspace_relative_path(relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    if initial_text is not None and not file_path.exists():
+        file_path.write_text(initial_text)
+    return file_path
+@
+
+<<test functions>>=
+def test_prepare_editor_file_creates_parent_directories(tmp_path):
+    file_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes/answer.txt",
+    )
+
+    assert file_path.parent.is_dir()
+
+
+def test_prepare_editor_file_only_writes_initial_text_once(tmp_path):
+    file_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="first\n",
+    )
+    file_path.write_text("second\n")
+
+    same_path = prepare_editor_file(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="first\n",
+    )
+
+    assert same_path.read_text() == "second\n"
+
+
+def test_prepare_editor_file_rejects_paths_outside_workspace(tmp_path):
+    with pytest.raises(ValueError, match="relative path inside the workspace"):
+        prepare_editor_file(
+            workspace=tmp_path,
+            relative_path="../notes.txt",
+        )
+@
+
+
+\section{Running interactive editor sessions}
+
+Unlike the PTY-backed shell, an interactive editor should own the user's
+terminal directly.  Full-screen programs such as [[vim]] already know how
+to manage the terminal when connected to the inherited TTY, and we do not
+need to capture every keystroke.  We therefore launch the editor as a
+foreground subprocess, wait for it to exit, and then read the file.
+
+<<functions>>=
+def run_editor(
+    *,
+    workspace: str | Path,
+    relative_path: str,
+    initial_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> EditorResult:
+    """Open the configured editor for one file in ``workspace``."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("Interactive editor steps require a TTY.")
+
+    started_at = utc_now()
+    environment = build_shell_environment(env)
+    command = resolve_editor_command(environment)
+    file_path = prepare_editor_file(
+        workspace=workspace,
+        relative_path=relative_path,
+        initial_text=initial_text,
+    )
+    completed = subprocess.run(
+        [*command, str(file_path)],
+        cwd=Path(workspace),
+        env=environment,
+    )
+    ended_at = utc_now()
+    text = file_path.read_text() if file_path.exists() else ""
+
+    return EditorResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=completed.returncode,
+        file_path=str(file_path),
+        text=text,
+    )
+@
+
+The real editor path needs a TTY, so unit tests inject a harmless command
+through [[EDITOR]] and only verify the file lifecycle around it.
+
+<<test functions>>=
+def test_run_editor_reads_back_edited_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setenv("EDITOR", "true")
+
+    result = run_editor(
+        workspace=tmp_path,
+        relative_path="notes.txt",
+        initial_text="tutorial\n",
+    )
+
+    assert result.exit_status == 0
+    assert result.text == "tutorial\n"
+    assert result.file_path.endswith("notes.txt")
+
+
+def test_run_editor_requires_tty(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    with pytest.raises(RuntimeError, match="require a TTY"):
+        run_editor(workspace=tmp_path, relative_path="notes.txt")
+@
+
+
+\section{Claiming the PTY as a controlling terminal}
+
+Attaching bash to the slave side of a PTY is not quite enough for a real
+interactive shell.  Bash also expects that terminal to be its controlling
+terminal, otherwise it disables job control and prints warnings before the
+prompt appears.
+
+Python 3.10 does not yet offer [[os.login_tty()]], so the smallest fix is
+to do the setup just before [[exec]] in the child process.  We start a new
+session and claim file descriptor [[0]], which already points at the PTY
+slave by then.
+
+<<functions>>=
+def prepare_child_terminal() -> None:
+    """Turn the PTY slave on fd ``0`` into the controlling terminal."""
+
+    os.setsid()
+    if hasattr(termios, "TIOCSCTTY"):
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+@
+
+
+\section{Launching bash on a configured PTY}
+
+The scripted and interactive shells must start bash in exactly the same PTY
+configuration.  A shared helper keeps the controlling-terminal fix in one
+place and ensures both paths see the same prompt and shell options.
+
+<<functions>>=
+def spawn_shell_process(
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
+    env: dict[str, str] | None = None,
+) -> tuple[int, subprocess.Popen]:
+    """Start bash on a PTY and return the master fd and child process."""
+
+    workspace_path = Path(workspace)
+    master_fd, slave_fd = pty.openpty()
+    try:
+        process = subprocess.Popen(
+            [shell, "--noprofile", "--norc", "-i"],
+            cwd=workspace_path,
+            env=build_shell_environment(env, prompt_name=prompt_name),
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            preexec_fn=prepare_child_terminal,
+            close_fds=True,
+        )
+    except Exception:
+        os.close(master_fd)
+        os.close(slave_fd)
+        raise
+
+    os.close(slave_fd)
+    return master_fd, process
+@
+
+
+\section{Treating PTY EOF consistently}
+
+Pseudo-terminals signal end-of-file differently from ordinary files.  Some
+systems return an empty byte string, while Linux often raises [[EIO]] once
+the slave side disappears.  Treating both cases as EOF keeps the relay and
+drain loops from spinning forever after the shell exits.
+
+<<functions>>=
+def read_pty_output(master_fd: int) -> bytes | None:
+    """Read one PTY chunk, or return ``None`` at end-of-file."""
+
+    try:
+        data = os.read(master_fd, 4096)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            return None
+        raise
+
+    if not data:
+        return None
+    return data
+@
+
+Let's verify that both common PTY EOF signals are normalised to
+[[None]].
+
+<<test functions>>=
+def test_read_pty_output_treats_eio_as_eof(monkeypatch):
+    def raise_eio(master_fd, size):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "read", raise_eio)
+
+    assert read_pty_output(3) is None
+
+
+def test_read_pty_output_treats_empty_read_as_eof(monkeypatch):
+    monkeypatch.setattr(os, "read", lambda master_fd, size: b"")
+
+    assert read_pty_output(3) is None
+@
+
+
+\section{Reading all output from a PTY}
+
+Both the scripted and interactive variants need the same drain logic:
+keep reading from the PTY until the shell exits and no more output is
+available.
+
+<<functions>>=
+def read_transcript(master_fd: int, process: subprocess.Popen) -> str:
+    """Drain PTY output until ``process`` exits and the PTY closes."""
+
+    chunks = bytearray()
+    master_open = True
+    while True:
+        readable, _, _ = select.select(
+            [master_fd] if master_open else [],
+            [],
+            [],
+            0.05,
+        )
+        if master_open and master_fd in readable:
+            data = read_pty_output(master_fd)
+            if data is None:
+                master_open = False
+            else:
+                chunks.extend(data)
+                continue
+
+        if process.poll() is not None and not master_open:
+            break
+
+    return chunks.decode("utf-8", errors="replace")
+@
+
+
+\section{Running scripted shell sessions}
+
+Tests should exercise the PTY path too, but they should not depend on a
+real terminal.  The scripted helper therefore writes a predefined command
+sequence to the PTY and then exits the shell automatically.
+
+<<functions>>=
+def run_scripted_shell(
+    commands: str,
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
+    env: dict[str, str] | None = None,
+) -> ShellResult:
+    """Run ``commands`` in a PTY-backed shell and capture the transcript."""
+
+    started_at = utc_now()
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        prompt_name=prompt_name,
+        env=env,
+    )
+
+    command_text = commands
+    if not command_text.endswith("\n"):
+        command_text += "\n"
+    os.write(master_fd, (command_text + "exit\n").encode("utf-8"))
+    transcript = read_transcript(master_fd, process)
+    os.close(master_fd)
+    exit_status = process.wait()
+    ended_at = utc_now()
+
+    return ShellResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=exit_status,
+        transcript=transcript,
+    )
+@
+
+Let's verify that scripted sessions both execute commands and write files
+into the chosen workspace.
+
+<<test functions>>=
+def test_run_scripted_shell_captures_output(tmp_path):
+    result = run_scripted_shell(
+        "printf 'hello\\n'",
+        workspace=tmp_path,
+    )
+
+    assert result.exit_status == 0
+    assert "hello" in result.transcript
+
+
+def test_run_scripted_shell_uses_workspace(tmp_path):
+    run_scripted_shell(
+        "printf 'tutorial\\n' > notes.txt",
+        workspace=tmp_path,
+    )
+
+    assert (tmp_path / "notes.txt").read_text() == "tutorial\n"
+
+
+def test_run_scripted_shell_uses_named_prompt(tmp_path):
+    result = run_scripted_shell(
+        "pwd",
+        workspace=tmp_path,
+        prompt_name="shell-basics",
+    )
+
+    assert "shell-basics $ " in result.transcript
+
+
+def test_run_scripted_shell_avoids_job_control_warnings(tmp_path):
+    result = run_scripted_shell(
+        "pwd",
+        workspace=tmp_path,
+    )
+
+    assert "cannot set terminal process group" not in result.transcript
+    assert "no job control in this shell" not in result.transcript
+@
+
+
+\section{Running interactive shell sessions}
+
+The interactive variant forwards bytes between the PTY and the user's
+terminal.  We temporarily switch stdin to raw mode so control characters
+and line editing behave as they do in a normal shell session.
+
+The relay loop must also notice when the PTY itself has closed.  Relying on
+an empty [[select()]] result is not enough because a closed PTY often stays
+readable at EOF.
+
+<<functions>>=
+def relay_interactive_shell(
+    master_fd: int,
+    process: subprocess.Popen,
+    stdin_fd: int,
+    stdout_fd: int,
+) -> str:
+    """Relay data between the user's terminal and a PTY-backed shell."""
+
+    transcript = bytearray()
+    master_open = True
+    while True:
+        readable, _, _ = select.select(
+            [stdin_fd] + ([master_fd] if master_open else []),
+            [],
+            [],
+            0.05,
+        )
+
+        if master_open and master_fd in readable:
+            data = read_pty_output(master_fd)
+            if data is None:
+                master_open = False
+            else:
+                transcript.extend(data)
+                os.write(stdout_fd, data)
+
+        if stdin_fd in readable:
+            data = os.read(stdin_fd, 4096)
+            if data and master_open:
+                os.write(master_fd, data)
+
+        if process.poll() is not None and not master_open:
+            break
+
+    return transcript.decode("utf-8", errors="replace")
+@
+
+Let's also verify the relay exits as soon as the child is gone and the PTY
+reports EOF.  That is the failure mode that previously left the tutorial
+hanging after [[exit]].
+
+<<test functions>>=
+def test_relay_interactive_shell_stops_after_process_exit_and_pty_eof(
+    monkeypatch,
+):
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+    calls = {"select": 0}
+
+    def fake_select(read_fds, write_fds, error_fds, timeout):
+        calls["select"] += 1
+        if calls["select"] > 1:
+            raise AssertionError("relay loop did not stop after PTY EOF")
+        return ([11], [], [])
+
+    monkeypatch.setattr(select, "select", fake_select)
+    monkeypatch.setattr(
+        "tutorial.shell.read_pty_output",
+        lambda master_fd: None,
+    )
+
+    transcript = relay_interactive_shell(11, FinishedProcess(), 12, 13)
+
+    assert transcript == ""
+    assert calls["select"] == 1
+@
+
+<<functions>>=
+def run_interactive_shell(
+    *,
+    workspace: str | Path,
+    shell: str = "/bin/bash",
+    prompt_name: str = "tutorial",
+    env: dict[str, str] | None = None,
+) -> ShellResult:
+    """Open an interactive PTY-backed shell in ``workspace``."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("Interactive tutorial shells require a TTY.")
+
+    started_at = utc_now()
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        prompt_name=prompt_name,
+        env=env,
+    )
+
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    original_mode = termios.tcgetattr(stdin_fd)
+
+    try:
+        tty.setraw(stdin_fd)
+        transcript = relay_interactive_shell(
+            master_fd,
+            process,
+            stdin_fd,
+            stdout_fd,
+        )
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
+
+    os.close(master_fd)
+    exit_status = process.wait()
+    ended_at = utc_now()
+    return ShellResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_status=exit_status,
+        transcript=transcript,
+    )
+@

@@ -1,0 +1,273 @@
+\chapter{Tutorial Model}
+\label{tutorial-model}
+
+The model layer answers two questions.  First, what information do we
+need to describe a tutorial step?  Second, what information do we need
+to preserve after the student has interacted with the shell?
+
+We keep the answer deliberately small.  A step has human-facing text,
+may optionally open a file in an editor, and carries one or two
+machine-checkable expectations; a run stores the recorded text that was
+produced while the student worked through the tutorial.
+
+
+\section{Code overview}
+
+<<[[model.py]]>>=
+"""Tutorial models shared by the loader, runner, and CLI."""
+
+<<imports>>
+
+<<classes>>
+@
+
+<<test [[model.py]]>>=
+"""Tests for the tutorial model."""
+
+from tutorial.model import *
+
+<<test functions>>
+@
+
+
+\section{Imports}
+
+The model uses plain dataclasses so that the runtime can serialise them
+without a custom encoding layer.
+
+<<imports>>=
+from __future__ import annotations
+
+from dataclasses import dataclass
+from dataclasses import field
+@
+
+
+\section{Describing tutorial steps}
+
+Each step needs enough information for two different readers.
+The student needs a title and instructions, while the runner needs a
+small, explicit check that tells it whether the student can move on.
+
+The step also needs one small interaction choice.  Most steps still open
+an interactive shell, but some tasks are clearer in an editor.  An
+optional file path is enough to distinguish those editor-backed steps
+without introducing a larger action language in the first release.
+
+The student-facing prose is still stored as plain strings, but we author
+those strings as Markdown.  That gives the CLI room to render short
+paragraphs and inline commands without inventing a larger tutorial markup
+format in the first release.
+
+We support two complementary checks:
+\begin{description}
+\item[Recorded-text patterns] small checks that should match the saved
+  text for the step, whether that text came from a shell session or from
+  an edited file.  Most are still plain strings, but some steps may need
+  an explicit regular expression.
+\item[Shell checks] a shell command that must succeed in the step
+  workspace.
+\end{description}
+
+The combination stays simple but covers the first release well.  Some
+steps are best recognised from what the student typed, while others are
+best recognised from the files they created.
+
+Plain strings remain the default because they are easy to author and read.
+The runner can still treat those strings a little more forgivingly than a
+raw byte-for-byte substring check by collapsing whitespace and removing
+shell control noise.  That avoids brittle failures from harmless prompt or
+completion variations while keeping the tutorial authoring format small.
+
+When a step genuinely needs more control, we also allow an explicit match
+mode in the form of a small mapping.  That keeps regular expressions
+available without forcing every tutorial author to write them.
+
+<<classes>>=
+@dataclass(frozen=True)
+class TextMatch:
+    """One recorded-text check for a tutorial step."""
+
+    pattern: str
+    mode: str = "contains"
+@
+
+<<classes>>=
+@dataclass(frozen=True)
+class TutorialStep:
+    """One interactive step in a tutorial."""
+
+    title: str
+    instructions: str
+    required_patterns: tuple[TextMatch, ...] = ()
+    check_command: str | None = None
+    hint: str | None = None
+    edit_file: str | None = None
+@
+
+Let's verify that a step can carry both transcript checks and a shell
+check.
+
+<<test functions>>=
+def test_tutorial_step_keeps_validation_rules():
+    step = TutorialStep(
+        title="Create a file",
+        instructions="Create notes.txt.",
+        required_patterns=(TextMatch("notes.txt"),),
+        check_command="test -f notes.txt",
+    )
+
+    assert step.required_patterns == (TextMatch("notes.txt"),)
+    assert step.check_command == "test -f notes.txt"
+
+
+def test_tutorial_step_can_request_editor_file():
+    step = TutorialStep(
+        title="Edit a file",
+        instructions="Open notes.txt and update it.",
+        edit_file="notes.txt",
+    )
+
+    assert step.edit_file == "notes.txt"
+@
+
+
+\section{Describing tutorials}
+
+The tutorial object groups steps under a stable identifier.  The stable
+identifier matters because progress is stored on disk, and the CLI needs
+an ID that remains valid even if the prose title is revised later.
+
+We also keep a small amount of source metadata.  That metadata lets the
+runner detect when an unfinished tutorial changed on disk and refuse to
+resume a run against a different definition.
+
+<<classes>>=
+@dataclass(frozen=True)
+class Tutorial:
+    """One loaded tutorial definition."""
+
+    id: str
+    title: str
+    summary: str
+    steps: tuple[TutorialStep, ...]
+    source_path: str | None = None
+    source_digest: str | None = None
+@
+
+<<test functions>>=
+def test_tutorial_groups_steps_under_stable_id():
+    tutorial = Tutorial(
+        id="demo",
+        title="Demo",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+        source_path="/tmp/demo.md",
+        source_digest="digest",
+    )
+
+    assert tutorial.id == "demo"
+    assert tutorial.steps[0].title == "One"
+    assert tutorial.source_digest == "digest"
+@
+
+
+\section{Recording step transcripts}
+
+Review only works if we keep the text the student produced, and progress
+tracking is more useful when it records whether the step was judged
+complete.  A transcript therefore captures the recorded text for the
+step, the exit status, and a boolean completion flag.
+
+Shell steps save the visible shell transcript.  Editor steps instead save
+the edited file contents and remember which file that text came from.
+That keeps review small while still making editor-backed steps readable
+after the original workspace changes.
+
+<<classes>>=
+@dataclass
+class StepTranscript:
+    """Recorded transcript for one tutorial step."""
+
+    tutorial_id: str
+    step_index: int
+    title: str
+    started_at: str
+    ended_at: str
+    exit_status: int
+    transcript: str
+    passed: bool = False
+    edited_file: str | None = None
+@
+
+<<test functions>>=
+def test_step_transcript_defaults_to_not_passed():
+    transcript = StepTranscript(
+        tutorial_id="demo",
+        step_index=0,
+        title="One",
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="pwd\r\n",
+    )
+
+    assert transcript.passed is False
+
+
+def test_step_transcript_can_store_edited_file_label():
+    transcript = StepTranscript(
+        tutorial_id="demo",
+        step_index=0,
+        title="Edit notes",
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-01-01T00:00:01+00:00",
+        exit_status=0,
+        transcript="tutorial basics\n",
+        edited_file="notes.txt",
+    )
+
+    assert transcript.edited_file == "notes.txt"
+@
+
+
+\section{Recording tutorial runs}
+
+Progress and review need a stable run record.  The run ID lets us resume
+an unfinished session, while the workspace path tells later steps where
+their files live.
+
+The run also stores a copy of the tutorial title and source metadata.
+That matters because review should still work even if the original
+tutorial file has been moved or deleted later.
+
+<<classes>>=
+@dataclass
+class TutorialRun:
+    """Recorded run of a tutorial."""
+
+    tutorial_id: str
+    run_id: str
+    workspace: str
+    started_at: str
+    updated_at: str
+    tutorial_title: str | None = None
+    tutorial_source_path: str | None = None
+    tutorial_source_digest: str | None = None
+    transcripts: list[StepTranscript] = field(default_factory=list)
+@
+
+<<test functions>>=
+def test_tutorial_run_starts_with_empty_transcript_list():
+    run = TutorialRun(
+        tutorial_id="demo",
+        tutorial_title="Demo",
+        run_id="run-1",
+        workspace="/tmp/demo",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert run.transcripts == []
+    assert run.tutorial_title == "Demo"
+@

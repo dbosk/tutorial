@@ -1,0 +1,93 @@
+\chapter{Package Overview}
+\label{tutorial-overview}
+
+The [[tutorial]] package is organised around one practical constraint:
+the first version should make shell-based tutorials possible without a
+full terminal UI framework.  We therefore keep the package surface
+small and expose a runner, a persistent state store, the file-backed
+tutorial catalog, and the CLI integration helpers.
+
+This chapter only re-exports the public pieces.  The actual behaviour
+lives in the later chapters.
+
+
+\section{Code overview}
+
+<<[[__init__.py]]>>=
+"""Public package surface for ``tutorial``."""
+
+<<imports>>
+
+__all__ = [
+    "ProgressState",
+    "RunResult",
+    "StateStore",
+    "StepTranscript",
+    "TextMatch",
+    "Tutorial",
+    "TutorialCatalog",
+    "TutorialRun",
+    "TutorialRunner",
+    "TutorialStep",
+    "add_argparse_subcommand",
+    "add_typer_subcommand",
+    "app",
+    "create_app",
+    "get_tutorial",
+    "get_tutorials",
+    "run_interactive_shell",
+    "run_scripted_shell",
+]
+@
+
+<<test [[tutorial.py]]>>=
+"""Tests for the public package exports."""
+
+from tutorial import *
+
+<<test functions>>
+@
+
+
+\section{Re-exporting the public surface}
+
+The package root exists to make the common use cases discoverable.
+Users should not need to remember where the CLI helpers or the model
+objects live internally.
+
+<<imports>>=
+from tutorial.cli import add_argparse_subcommand
+from tutorial.cli import add_typer_subcommand
+from tutorial.cli import app
+from tutorial.cli import create_app
+from tutorial.catalog import TutorialCatalog
+from tutorial.catalog import get_tutorial
+from tutorial.catalog import get_tutorials
+from tutorial.model import StepTranscript
+from tutorial.model import TextMatch
+from tutorial.model import Tutorial
+from tutorial.model import TutorialRun
+from tutorial.model import TutorialStep
+from tutorial.run import RunResult
+from tutorial.run import TutorialRunner
+from tutorial.shell import run_interactive_shell
+from tutorial.shell import run_scripted_shell
+from tutorial.state import ProgressState
+from tutorial.state import StateStore
+@
+
+Let's verify that the package exports the file-backed lookup helpers and
+the CLI integration helpers.
+
+<<test functions>>=
+def test_package_exports_catalog_helpers():
+    assert callable(get_tutorial)
+    assert callable(get_tutorials)
+    assert TutorialCatalog.__name__ == "TutorialCatalog"
+
+
+def test_package_exports_cli_helpers():
+    assert callable(create_app)
+    assert callable(add_typer_subcommand)
+    assert callable(add_argparse_subcommand)
+@
