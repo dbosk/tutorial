@@ -12,8 +12,12 @@ local example content in `tutorials/`.
 
 ## Commands
 
+- `poetry run tutorial` shows the CLI help.
 - `make` builds the generated Python, package, tests, and PDF documentation.
 - `poetry run tutorial list` lists the packaged built-in tutorials.
+- `poetry run tutorial install /path/to/tutorial.md` installs a tutorial in the user's tutorial directory.
+- `poetry run tutorial install https://example.com/tutorial.md` installs a tutorial from a URL.
+- `poetry run tutorial install --force /path/to/tutorial.md` overwrites an installed tutorial with the same tutorial ID.
 - `poetry run tutorial run using-tutorials` runs the universal usage tutorial.
 - `poetry run tutorial run shell-basics` runs the built-in shell and editor tutorial.
 - `poetry run tutorial run writing-tutorials` runs the built-in authoring tutorial.
@@ -29,8 +33,10 @@ local example content in `tutorials/`.
 - A step may start with a fenced `tutorial-step` YAML block for `required_patterns`, `check_command`, `hint`, and `edit_file`.
 - `edit_file` opens a workspace-relative file in `$EDITOR`; if `$EDITOR` is unset, the runner falls back to `vim`, `vi`, or `nano` when available.
 - The standalone CLI auto-loads the packaged built-ins.
+- The standalone CLI also auto-loads tutorials installed in the user's tutorial directory.
 - Extra `--tutorial-path` values are appended after the built-ins.
-- Embedded hosts should prepend the universal `using-tutorials` lesson before host-specific tutorials.
+- Embedded hosts prepend the universal `using-tutorials` lesson before host-specific tutorials and do not load the user's installed tutorial directory.
+- The standalone-only `install` command is not exposed when `tutorial` is mounted as a subcommand inside another Typer or argparse app.
 - Tutorial-authored `check_command` validation is disabled by default and only runs when `--allow-shell-checks` is passed.
 
 ## Layout

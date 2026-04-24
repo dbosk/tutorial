@@ -373,17 +373,21 @@ def front_matter_mapping(front_matter: str) -> dict:
 @
 
 
-\section{Loading one tutorial file}
+\section{Parsing one tutorial text}
 
-Loading a tutorial file is the point where the textual format becomes the
-typed runtime model.
+The parser itself should not care whether the Markdown came from a local
+file, a downloaded URL, or a future in-memory source.  Keeping the text
+parser separate lets the installer validate raw tutorial content without
+duplicating any schema checks.
 
 <<functions>>=
-def load_tutorial_file(path: str | Path) -> Tutorial:
-    """Load one Markdown tutorial file into a [[Tutorial]]."""
+def parse_tutorial_text(
+    text: str,
+    *,
+    source_path: str | Path | None = None,
+) -> Tutorial:
+    """Parse one Markdown tutorial text into a [[Tutorial]]."""
 
-    tutorial_path = Path(path)
-    text = tutorial_path.read_text()
     front_matter, body = split_yaml_front_matter(text)
     metadata = front_matter_mapping(front_matter)
     reject_unknown_keys(metadata, {"id", "title", "summary"}, "Tutorial")
@@ -397,8 +401,46 @@ def load_tutorial_file(path: str | Path) -> Tutorial:
         title=require_string(metadata, "title", "Tutorial"),
         summary=require_string(metadata, "summary", "Tutorial"),
         steps=steps,
-        source_path=str(tutorial_path.resolve()),
+        source_path=None if source_path is None else str(source_path),
         source_digest=build_source_digest(text),
+    )
+@
+
+Let's verify that the raw-text parser can validate downloaded or in-memory
+content before that content exists on disk.
+
+<<test functions>>=
+def test_parse_tutorial_text_builds_tutorial_without_source_path():
+    tutorial = parse_tutorial_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do the first thing.\n"
+    )
+
+    assert tutorial.id == "demo"
+    assert tutorial.steps[0].title == "Step one"
+    assert tutorial.source_path is None
+    assert tutorial.source_digest
+@
+
+
+\section{Loading one tutorial file}
+
+Loading a tutorial file is the point where the textual format becomes the
+typed runtime model.
+
+<<functions>>=
+def load_tutorial_file(path: str | Path) -> Tutorial:
+    """Load one Markdown tutorial file into a [[Tutorial]]."""
+
+    tutorial_path = Path(path).resolve()
+    return parse_tutorial_text(
+        tutorial_path.read_text(),
+        source_path=tutorial_path,
     )
 @
 

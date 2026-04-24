@@ -21,7 +21,7 @@ layer and only varies the argument plumbing.
 
 <<functions>>
 
-app = create_app(tutorial_paths=standalone_tutorial_paths())
+app = create_standalone_app()
 @
 
 <<test [[cli.py]]>>=
@@ -64,10 +64,14 @@ import json
 from pathlib import Path
 from typing import Annotated
 from typing import Callable
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import platformdirs
 from tutorial.catalog import TutorialCatalog
 from tutorial.catalog import builtin_tutorial_paths
+from tutorial.catalog import parse_tutorial_text
 from tutorial.catalog import universal_tutorial_path
 from rich.console import Console
 from rich.markdown import Markdown
@@ -151,11 +155,44 @@ Command-line [[--tutorial-path]] additions remain explicit extras.  They
 come after the configured defaults so packaged onboarding still appears
 first in the list.
 
+User-installed tutorials belong only to the standalone command.  Embedded
+hosts should remain self-contained so they can control exactly which
+tutorials they expose.
+
+<<functions>>=
+def user_tutorial_dir() -> Path:
+    """Return the directory for user-installed tutorials."""
+
+    return (
+        platformdirs.user_data_path(
+            "tutorial",
+            appauthor=False,
+            ensure_exists=False,
+        )
+        / "tutorials"
+    )
+@
+
+<<functions>>=
+def installed_tutorial_paths() -> tuple[Path, ...]:
+    """Return the standalone paths for user-installed tutorials."""
+
+    tutorial_dir = user_tutorial_dir()
+    if not tutorial_dir.is_dir():
+        return ()
+    if not any(path.is_file() for path in tutorial_dir.rglob("*.md")):
+        return ()
+    return (tutorial_dir,)
+@
+
 <<functions>>=
 def standalone_tutorial_paths() -> tuple[Path, ...]:
-    """Return the packaged built-ins for the standalone CLI."""
+    """Return the default tutorial paths for the standalone CLI."""
 
-    return builtin_tutorial_paths()
+    return effective_tutorial_paths(
+        builtin_tutorial_paths(),
+        installed_tutorial_paths(),
+    )
 @
 
 <<functions>>=
@@ -168,8 +205,33 @@ def embedded_tutorial_paths(
 @
 
 <<test functions>>=
-def test_standalone_tutorial_paths_match_builtin_catalog():
+def test_standalone_tutorial_paths_use_only_builtins_when_user_dir_missing(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
+
     assert standalone_tutorial_paths() == builtin_tutorial_paths()
+
+
+def test_standalone_tutorial_paths_append_user_dir_when_it_has_tutorials(
+    monkeypatch,
+    tmp_path,
+):
+    tutorial_dir = tmp_path / "user"
+    tutorial_dir.mkdir()
+    (tutorial_dir / "installed-demo.md").write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A user tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+
+    assert standalone_tutorial_paths() == builtin_tutorial_paths() + (tutorial_dir,)
 
 
 def test_embedded_tutorial_paths_prepends_universal_tutorial():
@@ -1299,11 +1361,284 @@ def test_run_tutorial_with_menu_can_exit_after_failed_step(tmp_path):
 @
 
 
+\section{Reading tutorial sources for installation}
+
+Installation accepts either a local Markdown file or a remote Markdown URL.
+Both sources should go through the same validation path, so the only job
+here is to fetch text and reject obviously wrong inputs early.
+
+<<functions>>=
+def is_tutorial_url(source: str) -> bool:
+    """Return whether ``source`` looks like an HTTP(S) tutorial URL."""
+
+    parsed = urllib.parse.urlparse(source)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+@
+
+<<functions>>=
+def read_tutorial_source(source: str) -> tuple[str, str]:
+    """Return ``(source_name, text)`` for one installable tutorial."""
+
+    if is_tutorial_url(source):
+        parsed = urllib.parse.urlparse(source)
+        if Path(parsed.path).suffix.lower() != ".md":
+            raise ValueError(
+                f"Tutorial URL {source} must point to a .md file."
+            )
+        try:
+            with urllib.request.urlopen(source, timeout=30) as response:
+                encoding = response.headers.get_content_charset() or "utf-8"
+                return source, response.read().decode(encoding)
+        except (OSError, urllib.error.URLError, UnicodeDecodeError) as error:
+            raise ValueError(
+                f"Could not read tutorial URL {source}: {error}"
+            ) from error
+
+    path = Path(source)
+    if not path.exists():
+        raise ValueError(f"Tutorial path {path} does not exist.")
+    if not path.is_file():
+        raise ValueError(f"Tutorial path {path} must be a file.")
+    if path.suffix.lower() != ".md":
+        raise ValueError(f"Tutorial file {path} must use the .md extension.")
+
+    resolved_path = path.resolve()
+    try:
+        return str(resolved_path), resolved_path.read_text()
+    except OSError as error:
+        raise ValueError(
+            f"Could not read tutorial file {path}: {error}"
+        ) from error
+@
+
+<<test functions>>=
+def test_read_tutorial_source_reads_local_markdown_file(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text("# Demo\n")
+
+    source_name, text = read_tutorial_source(str(tutorial_path))
+
+    assert source_name == str(tutorial_path.resolve())
+    assert text == "# Demo\n"
+
+
+def test_read_tutorial_source_reads_markdown_url(monkeypatch):
+    class FakeHeaders:
+        def get_content_charset(self):
+            return "utf-8"
+
+    class FakeResponse:
+        headers = FakeHeaders()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"# Demo\n"
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    source_name, text = read_tutorial_source("https://example.com/demo.md")
+
+    assert source_name == "https://example.com/demo.md"
+    assert text == "# Demo\n"
+@
+
+
+\section{Installing tutorials into the user catalog}
+
+Standalone installation writes each tutorial to a predictable filename based
+on its tutorial ID.  That gives one stable location per installed tutorial
+and makes duplicate detection a simple overwrite policy instead of a search
+through arbitrary filenames.
+
+<<functions>>=
+def installed_tutorial_file(tutorial_id: str) -> Path:
+    """Return the canonical installed path for ``tutorial_id``."""
+
+    return user_tutorial_dir() / f"{tutorial_id}.md"
+@
+
+<<functions>>=
+def install_tutorial(source: str, *, force: bool = False) -> tuple[str, Path]:
+    """Install one tutorial from a file path or URL."""
+
+    source_name, text = read_tutorial_source(source)
+    tutorial = parse_tutorial_text(text, source_path=source_name)
+    if tutorial.id in tuple(
+        item.id
+        for item in TutorialCatalog(builtin_tutorial_paths()).get_tutorials()
+    ):
+        raise ValueError(
+            f"Tutorial {tutorial.id!r} is built in and cannot be installed."
+        )
+    target_path = installed_tutorial_file(tutorial.id)
+
+    if target_path.exists() and target_path.is_dir():
+        raise ValueError(f"Installed tutorial path {target_path} is a directory.")
+    if target_path.exists() and not force:
+        raise ValueError(
+            f"Tutorial {tutorial.id!r} is already installed at {target_path}. "
+            "Use --force to overwrite."
+        )
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target_path.write_text(text)
+    except OSError as error:
+        raise ValueError(
+            f"Could not install tutorial at {target_path}: {error}"
+        ) from error
+    return tutorial.id, target_path
+@
+
+Let's verify that installation writes the validated Markdown into the user
+catalog, supports URL sources, and rejects built-ins that would make the
+catalog ambiguous.
+
+<<test functions>>=
+def test_install_tutorial_copies_local_markdown_into_user_dir(
+    monkeypatch,
+    tmp_path,
+):
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    install_dir = tmp_path / "installed"
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+
+    tutorial_id, installed_path = install_tutorial(str(source))
+
+    assert tutorial_id == "installed-demo"
+    assert installed_path == install_dir / "installed-demo.md"
+    assert installed_path.read_text() == source.read_text()
+
+
+def test_install_tutorial_can_overwrite_with_force(monkeypatch, tmp_path):
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: First version.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    install_dir = tmp_path / "installed"
+    install_dir.mkdir()
+    installed_path = install_dir / "installed-demo.md"
+    installed_path.write_text("old")
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+
+    with pytest.raises(ValueError, match="Use --force"):
+        install_tutorial(str(source))
+
+    source.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: Second version.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it again.\n"
+    )
+
+    tutorial_id, overwritten_path = install_tutorial(str(source), force=True)
+
+    assert tutorial_id == "installed-demo"
+    assert overwritten_path == installed_path
+    assert "Second version." in installed_path.read_text()
+
+
+def test_install_tutorial_can_install_from_url(monkeypatch, tmp_path):
+    install_dir = tmp_path / "installed"
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+
+    class FakeHeaders:
+        def get_content_charset(self):
+            return "utf-8"
+
+    class FakeResponse:
+        headers = FakeHeaders()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                b"---\n"
+                b"id: url-demo\n"
+                b"title: URL Demo\n"
+                b"summary: Downloaded.\n"
+                b"---\n\n"
+                b"# Step one\n\n"
+                b"Do it.\n"
+            )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    tutorial_id, installed_path = install_tutorial("https://example.com/demo.md")
+
+    assert tutorial_id == "url-demo"
+    assert installed_path == install_dir / "url-demo.md"
+    assert installed_path.is_file()
+
+
+def test_install_tutorial_rejects_builtin_tutorial_ids(monkeypatch, tmp_path):
+    source = tmp_path / "shell-basics.md"
+    source.write_text(
+        "---\n"
+        "id: shell-basics\n"
+        "title: Replacement\n"
+        "summary: This should fail.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
+
+    with pytest.raises(ValueError, match="built in"):
+        install_tutorial(str(source))
+@
+
+
 \section{Building the Typer application}
 
-The standalone CLI and Typer embedding both rely on the same factory.
-Using a factory rather than a single global app keeps the namespace and
-state-root configuration overridable for tests and host applications.
+The standalone CLI and Typer embedding both rely on the same shared command
+set.  Using a factory rather than a single global app keeps the namespace
+and state-root configuration overridable for tests and host applications.
+
+We still make help the default action when no subcommand is given.  That is
+friendlier for the standalone binary, and it also helps embedded hosts
+because [[host tutorial]] should explain itself instead of failing with a
+missing-command error.
+
+Typer's built-in [[no_args_is_help]] prints the right help text, but in the
+current Typer/Click combination it still exits with the usual
+missing-command status.  We therefore make the group invokable without a
+subcommand and emit the help text ourselves when nothing was selected.
 
 <<functions>>=
 def create_app(
@@ -1311,13 +1646,30 @@ def create_app(
     namespace: str = "tutorial",
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
+    tutorial_path_provider: Callable[[], tuple[str | Path, ...]] | None = None,
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Create a Typer application for tutorials."""
 
-    application = typer.Typer(help="Run interactive command-line tutorials.")
+    application = typer.Typer(
+        help="Run interactive command-line tutorials.",
+        invoke_without_command=True,
+    )
+
+    @application.callback(invoke_without_command=True)
+    def app_callback(ctx: typer.Context) -> None:
+        """Show help when the tutorial group is invoked without a command."""
+
+        if ctx.invoked_subcommand is None:
+            typer.echo(ctx.get_help())
+            raise typer.Exit(code=0)
+
+    def configured_tutorial_paths() -> tuple[str | Path, ...]:
+        if tutorial_path_provider is not None:
+            return tuple(tutorial_path_provider())
+        return tuple(tutorial_paths)
 
     def runner(
         *,
@@ -1325,7 +1677,10 @@ def create_app(
         command_allow_shell_checks: bool = False,
         require_paths: bool = False,
     ) -> TutorialRunner:
-        paths = effective_tutorial_paths(tutorial_paths, command_tutorial_paths)
+        paths = effective_tutorial_paths(
+            configured_tutorial_paths(),
+            command_tutorial_paths,
+        )
         if require_paths:
             paths = require_tutorial_paths(paths)
         return build_runner(
@@ -1340,7 +1695,7 @@ def create_app(
     def run_tutorial_id_completion(ctx, incomplete: str) -> list[str]:
         command_paths = tuple(ctx.params.get("tutorial_path") or ())
         return suggest_run_tutorial_ids(
-            tutorial_paths,
+            configured_tutorial_paths(),
             command_paths,
             incomplete,
         )
@@ -1519,9 +1874,61 @@ def create_app(
     return application
 @
 
-Let's verify that the generated application exposes list/run commands that
-can load configured tutorials and a review command that still works from
-saved runs alone.
+
+\section{Building the standalone Typer application}
+
+The standalone command adds one concern that embedded hosts should not get:
+installing tutorials into the current user's personal catalog.  A small
+wrapper around the shared app factory keeps that boundary explicit.
+
+<<functions>>=
+def create_standalone_app(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
+    allow_shell_checks: bool = False,
+) -> typer.Typer:
+    """Create the standalone tutorial CLI."""
+
+    application = create_app(
+        namespace=namespace,
+        state_root=state_root,
+        tutorial_path_provider=standalone_tutorial_paths,
+        shell_runner=shell_runner,
+        editor_runner=editor_runner,
+        allow_shell_checks=allow_shell_checks,
+    )
+
+    @application.command("install")
+    def install_command(
+        source: str,
+        force: Annotated[
+            bool,
+            typer.Option(
+                "--force",
+                "-f",
+                help="Overwrite an installed tutorial with the same ID.",
+            ),
+        ] = False,
+    ) -> None:
+        """Install a tutorial Markdown file or URL for this user."""
+
+        try:
+            tutorial_id, target_path = install_tutorial(source, force=force)
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+
+        typer.echo(f"Installed {tutorial_id} at {target_path}")
+
+    return application
+@
+
+Let's verify that the shared app still exposes the reusable list/run/review
+commands, while the standalone wrapper adds help-on-no-args and installation
+without leaking those standalone-only pieces into embedded hosts.
 
 <<test functions>>=
 def test_list_command_shows_shell_basics(tmp_path):
@@ -1539,10 +1946,7 @@ def test_list_command_shows_shell_basics(tmp_path):
 def test_standalone_app_lists_packaged_builtins_without_tutorial_path(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
-        create_app(
-            state_root=tmp_path / "state",
-            tutorial_paths=standalone_tutorial_paths(),
-        ),
+        create_standalone_app(state_root=tmp_path / "state"),
         ["list"],
     )
 
@@ -1551,6 +1955,102 @@ def test_standalone_app_lists_packaged_builtins_without_tutorial_path(tmp_path):
     assert lines[0].startswith("using-tutorials\t")
     assert any(line.startswith("shell-basics\t") for line in lines[1:])
     assert any(line.startswith("writing-tutorials\t") for line in lines[1:])
+
+
+def test_standalone_app_shows_help_when_no_command_is_given():
+    runner = CliRunner()
+
+    result = runner.invoke(create_standalone_app(), [])
+
+    assert result.exit_code == 0
+    assert "Usage:" in result.stdout
+    assert "install" in result.stdout
+
+
+def test_standalone_app_lists_installed_user_tutorials(monkeypatch, tmp_path):
+    tutorial_dir = tmp_path / "user"
+    tutorial_dir.mkdir()
+    (tutorial_dir / "installed-demo.md").write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(state_root=tmp_path / "state"),
+        ["list"],
+    )
+
+    assert result.exit_code == 0
+    assert "installed-demo\t" in result.stdout
+
+
+def test_standalone_install_command_installs_local_tutorial(monkeypatch, tmp_path):
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    install_dir = tmp_path / "user"
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(create_standalone_app(), ["install", str(source)])
+
+    assert result.exit_code == 0
+    assert "Installed installed-demo at" in result.stdout
+    assert (install_dir / "installed-demo.md").read_text() == source.read_text()
+
+
+def test_standalone_install_command_overwrites_with_force(monkeypatch, tmp_path):
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: New version.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    install_dir = tmp_path / "user"
+    install_dir.mkdir()
+    installed_path = install_dir / "installed-demo.md"
+    installed_path.write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: Old version.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+
+    runner = CliRunner()
+    result = runner.invoke(create_standalone_app(), ["install", str(source)])
+
+    assert result.exit_code == 1
+    assert "Use --force to overwrite." in result.output
+
+    result = runner.invoke(
+        create_standalone_app(),
+        ["install", "--force", str(source)],
+    )
+
+    assert result.exit_code == 0
+    assert "New version." in installed_path.read_text()
 
 
 def test_review_command_shows_saved_transcript(tmp_path):
@@ -1738,6 +2238,18 @@ def test_add_typer_subcommand_registers_tutorial_namespace(tmp_path):
     assert "shell-basics\t" in result.stdout
 
 
+def test_add_typer_subcommand_shows_help_when_no_nested_command_is_given(tmp_path):
+    parent = typer.Typer()
+    add_typer_subcommand(parent, state_root=tmp_path / "state")
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial"])
+
+    assert result.exit_code == 0
+    assert "Usage:" in result.stdout
+    assert "install" not in result.stdout
+
+
 def test_add_typer_subcommand_prepends_universal_tutorial(tmp_path):
     tutorial_path = write_demo_tutorial(tmp_path)
     parent = typer.Typer()
@@ -1754,6 +2266,38 @@ def test_add_typer_subcommand_prepends_universal_tutorial(tmp_path):
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines[0].startswith("using-tutorials\t")
     assert any(line.startswith("shell-basics\t") for line in lines[1:])
+
+
+def test_add_typer_subcommand_ignores_user_installed_tutorials(
+    monkeypatch,
+    tmp_path,
+):
+    tutorial_dir = tmp_path / "user"
+    tutorial_dir.mkdir()
+    (tutorial_dir / "installed-demo.md").write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+
+    tutorial_path = write_demo_tutorial(tmp_path)
+    parent = typer.Typer()
+    add_typer_subcommand(
+        parent,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial", "list"])
+
+    assert result.exit_code == 0
+    assert "installed-demo\t" not in result.stdout
 @
 
 
@@ -1882,6 +2426,42 @@ def test_add_argparse_subcommand_prepends_universal_tutorial(tmp_path, capsys):
     lines = [line for line in captured.out.splitlines() if line.strip()]
     assert lines[0].startswith("using-tutorials\t")
     assert any(line.startswith("shell-basics\t") for line in lines[1:])
+
+
+def test_add_argparse_subcommand_ignores_user_installed_tutorials(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    tutorial_dir = tmp_path / "user"
+    tutorial_dir.mkdir()
+    (tutorial_dir / "installed-demo.md").write_text(
+        "---\n"
+        "id: installed-demo\n"
+        "title: Installed Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do it.\n"
+    )
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+
+    tutorial_path = write_demo_tutorial(tmp_path)
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+    add_argparse_subcommand(
+        subparsers,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+    )
+
+    args = parser.parse_args(["tutorial", "list"])
+    exit_code = run_argparse_command(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "installed-demo\t" not in captured.out
 @
 
 
