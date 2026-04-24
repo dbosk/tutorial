@@ -1132,7 +1132,10 @@ def question_answers_match(step: TutorialStep, recorded: str) -> bool:
 
     kind = step_kind(step)
     if kind == "input":
-        return transcript_matches_patterns(recorded, tuple(step.answers))
+        return all(
+            input_answer_matches(recorded, answer)
+            for answer in step.answers
+        )
     if kind == "single_select":
         return recorded.strip() == step.answers[0]
     if kind == "multi_select":
@@ -1143,6 +1146,22 @@ def question_answers_match(step: TutorialStep, recorded: str) -> bool:
         }
         return selected == set(step.answers)
     return True
+@
+
+Input questions differ from shell transcripts in one important way.  The
+learner is answering a single prompt, not producing a noisy transcript with
+prompts, control sequences, and surrounding commands.  Plain-string input
+answers should therefore behave like normalised exact answers, while explicit
+regular expressions remain available for steps that intentionally accept a
+family of responses.
+
+<<functions>>=
+def input_answer_matches(recorded: str, answer: str | TextMatch) -> bool:
+    """Return whether one authored input answer accepts ``recorded``."""
+
+    if isinstance(answer, TextMatch):
+        return transcript_matches_pattern(recorded, answer)
+    return normalise_match_text(recorded) == normalise_match_text(answer)
 @
 
 <<functions>>=
@@ -1211,6 +1230,28 @@ def test_validate_step_uses_regex_answers_for_input_steps(tmp_path):
 
     assert validate_step(step, "pwd\n", tmp_path, allow_shell_checks=True) is True
     assert validate_step(step, "ls\n", tmp_path, allow_shell_checks=True) is False
+
+
+def test_validate_step_requires_exact_literal_answers_for_input_steps(tmp_path):
+    step = TutorialStep(
+        title="Type the command",
+        instructions="Do it.",
+        kind="input",
+        answers=("tutorial review using-tutorials",),
+    )
+
+    assert validate_step(
+        step,
+        "  tutorial   review using-tutorials  \n",
+        tmp_path,
+        allow_shell_checks=True,
+    ) is True
+    assert validate_step(
+        step,
+        "please run tutorial review using-tutorials\n",
+        tmp_path,
+        allow_shell_checks=True,
+    ) is False
 
 
 def test_validate_step_checks_literal_single_select_answers(tmp_path):

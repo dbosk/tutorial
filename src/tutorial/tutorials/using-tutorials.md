@@ -98,7 +98,8 @@ finish the step.
 ```tutorial-step
 kind: input
 answers:
-  - tutorial review using-tutorials
+  - mode: regex
+    pattern: ^tutorial\s+review\s+using-tutorials(?:\s+)?$
 hint: Type the full review command for this tutorial.
 ```
 
