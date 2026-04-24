@@ -1,7 +1,7 @@
 ---
 id: using-tutorials
 title: Using Tutorials
-summary: Learn how list, run, and review fit together in tutorial work.
+summary: Learn how list, run, question prompts, and review fit together.
 ---
 
 # List the available tutorials
@@ -93,6 +93,60 @@ This contrasts a shell step with an editor step while keeping the same
 validation idea: the tutorial only checks what was recorded after you
 finish the step.
 
+# Answer a one-line question
+
+```tutorial-step
+kind: input
+answers:
+  - tutorial review using-tutorials
+hint: Type the full review command for this tutorial.
+```
+
+Type the exact command that reviews this tutorial:
+`tutorial review using-tutorials`.
+
+This is the smallest question step. The tutorial asks for one line of
+text, records it immediately, and validates it without opening a shell.
+
+# Pick the command that starts work
+
+```tutorial-step
+kind: single_select
+options:
+  - tutorial list
+  - tutorial run
+  - tutorial review
+answers:
+  - tutorial run
+```
+
+Choose the command that starts or resumes one tutorial.
+
+Single-select questions show numbered options. You can answer with the
+number or with the full option text.
+
+# Pick every read-only tutorial command
+
+```tutorial-step
+kind: multi_select
+options:
+  - tutorial list
+  - tutorial run
+  - tutorial review
+  - tutorial install
+answers:
+  - tutorial list
+  - tutorial review
+hint: Choose the commands that only read tutorial definitions or saved state.
+```
+
+Choose every tutorial command here that reads existing information without
+starting a run or installing anything.
+
+Multi-select questions also use literal option text. The learner may pick
+the correct options in any order, but the tutorial still stores the
+authored answer list.
+
 # Review the saved run
 
 ```tutorial-step
@@ -101,6 +155,7 @@ required_patterns:
   - Using Tutorials
   - "Step 1: List the available tutorials"
   - "Step 4: Capture the workflow in a file"
+  - "Step 7: Pick every read-only tutorial command"
   - tutorial review shows saved transcripts
 hint: Review `using-tutorials` from inside this shell.
 ```
@@ -116,4 +171,5 @@ At this point you have seen the tutorial workflow end to end:
 
 - `tutorial list` discovers what you can run
 - `tutorial run` starts or resumes one tutorial at a time
+- question steps can ask for input, one choice, or several choices
 - `tutorial review` inspects the saved record afterwards

@@ -18,8 +18,8 @@ local example content in `tutorials/`.
 - `poetry run tutorial install /path/to/tutorial.md` installs a tutorial in the user's tutorial directory.
 - `poetry run tutorial install https://example.com/tutorial.md` installs a tutorial from a URL.
 - `poetry run tutorial install --force /path/to/tutorial.md` overwrites an installed tutorial with the same tutorial ID.
-- `poetry run tutorial run using-tutorials` runs the universal usage tutorial.
-- `poetry run tutorial run shell-basics` runs the built-in shell and editor tutorial.
+- `poetry run tutorial run using-tutorials` runs the universal usage tutorial, including shell, editor, and question steps.
+- `poetry run tutorial run shell-basics` runs the built-in shell and editor skills tutorial.
 - `poetry run tutorial run writing-tutorials` runs the built-in authoring tutorial.
 - `poetry run tutorial list --tutorial-path /path/to/more-tutorials` appends extra tutorials after the built-ins.
 - `poetry run tutorial review using-tutorials` reviews saved transcripts.
@@ -30,8 +30,11 @@ local example content in `tutorials/`.
 - The file must start with YAML front matter delimited by `---`.
 - Required top-level fields are `id`, `title`, and `summary`.
 - Each top-level `# Heading` becomes one tutorial step.
-- A step may start with a fenced `tutorial-step` YAML block for `required_patterns`, `check_command`, `hint`, and `edit_file`.
+- A step may start with a fenced `tutorial-step` YAML block for `required_patterns`, `check_command`, `hint`, `edit_file`, `kind`, `options`, and `answers`.
+- Steps without `kind` or `edit_file` open a shell.
 - `edit_file` opens a workspace-relative file in `$EDITOR`; if `$EDITOR` is unset, the runner falls back to `vim`, `vi`, or `nano` when available.
+- `kind: input`, `kind: single_select`, and `kind: multi_select` prompt directly in the CLI instead of opening a shell or editor.
+- `input` answers use the same string-or-`{mode, pattern}` format as `required_patterns`; select questions use literal option text in `options` and `answers`.
 - The standalone CLI auto-loads the packaged built-ins.
 - The standalone CLI also auto-loads tutorials installed in the user's tutorial directory.
 - Extra `--tutorial-path` values are appended after the built-ins.

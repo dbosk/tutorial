@@ -547,9 +547,9 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
 
 Once the optional metadata block is separated from the Markdown body, the
 remaining conversion is still mostly a straightforward mapping onto
-[[TutorialStep]].  The only interaction-specific field is [[edit_file]],
-which tells the runner to open that workspace-relative path in an editor
-instead of launching a shell for the step.
+[[TutorialStep]].  The interaction schema is still intentionally small:
+shell is the default, [[edit_file]] still selects editor steps, and
+authored questions add [[kind]], [[options]], and [[answers]].
 
 The recorded-text checks are slightly richer.  Tutorials may still use a
 simple YAML list of strings, but each item can also be a small mapping with
@@ -563,15 +563,45 @@ def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
     metadata, instructions = step_metadata_and_instructions(section_body)
     reject_unknown_keys(
         metadata,
-        {"required_patterns", "check_command", "hint", "edit_file"},
+        {
+            "answers",
+            "check_command",
+            "edit_file",
+            "hint",
+            "kind",
+            "options",
+            "required_patterns",
+        },
         f"Step {title!r}",
     )
     if not instructions:
         raise ValueError(f"Step {title!r} must contain instructions.")
 
+    kind = optional_string(metadata.get("kind"), f"Step {title!r} kind")
+    has_options = "options" in metadata
+    has_answers = "answers" in metadata
+    options = option_tuple(metadata.get("options"), f"Step {title!r} options")
+    answers = step_answers(metadata, title, kind)
+    edit_file = optional_string(
+        metadata.get("edit_file"),
+        f"Step {title!r} edit_file",
+    )
+    validate_step_shape(
+        title,
+        kind=kind,
+        has_options=has_options,
+        has_answers=has_answers,
+        options=options,
+        answers=answers,
+        edit_file=edit_file,
+    )
+
     return TutorialStep(
         title=title,
         instructions=instructions,
+        kind=kind,
+        options=options,
+        answers=answers,
         required_patterns=text_match_tuple(
             metadata.get("required_patterns"),
             f"Step {title!r} required_patterns",
@@ -581,10 +611,7 @@ def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
             f"Step {title!r} check_command",
         ),
         hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
-        edit_file=optional_string(
-            metadata.get("edit_file"),
-            f"Step {title!r} edit_file",
-        ),
+        edit_file=edit_file,
     )
 @
 
@@ -684,6 +711,133 @@ def test_load_tutorial_file_parses_editor_step_metadata(tmp_path):
 
     assert tutorial.steps[0].edit_file == "notes.txt"
     assert tutorial.steps[0].required_patterns == (TextMatch("tutorial"),)
+
+
+def test_load_tutorial_file_parses_input_step_answers(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Type the command\n\n"
+        "```tutorial-step\n"
+        "kind: input\n"
+        "answers:\n"
+        "  - mode: regex\n"
+        "    pattern: ^pwd(?:\\\\s+)?$\n"
+        "```\n\n"
+        "Type the command that prints the working directory.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].kind == "input"
+    assert tutorial.steps[0].answers == (
+        TextMatch("^pwd(?:\\\\s+)?$", mode="regex"),
+    )
+
+
+def test_load_tutorial_file_parses_single_select_step(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Pick one\n\n"
+        "```tutorial-step\n"
+        "kind: single_select\n"
+        "options:\n"
+        "  - pwd\n"
+        "  - cd\n"
+        "  - ls\n"
+        "answers:\n"
+        "  - pwd\n"
+        "```\n\n"
+        "Pick the command that prints the working directory.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].kind == "single_select"
+    assert tutorial.steps[0].options == ("pwd", "cd", "ls")
+    assert tutorial.steps[0].answers == ("pwd",)
+
+
+def test_load_tutorial_file_parses_multi_select_step(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Pick all that apply\n\n"
+        "```tutorial-step\n"
+        "kind: multi_select\n"
+        "options:\n"
+        "  - pwd\n"
+        "  - ls\n"
+        "  - mkdir\n"
+        "answers:\n"
+        "  - pwd\n"
+        "  - ls\n"
+        "```\n\n"
+        "Pick the commands that inspect the current directory.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].kind == "multi_select"
+    assert tutorial.steps[0].options == ("pwd", "ls", "mkdir")
+    assert tutorial.steps[0].answers == ("pwd", "ls")
+
+
+def test_load_tutorial_file_rejects_answers_without_kind(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```tutorial-step\n"
+        "answers:\n"
+        "  - pwd\n"
+        "```\n\n"
+        "Run `pwd`.\n"
+    )
+
+    with pytest.raises(ValueError, match="answers require kind"):
+        load_tutorial_file(tutorial_path)
+
+
+def test_load_tutorial_file_rejects_unknown_select_answer(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Pick one\n\n"
+        "```tutorial-step\n"
+        "kind: single_select\n"
+        "options:\n"
+        "  - pwd\n"
+        "  - ls\n"
+        "answers:\n"
+        "  - cd\n"
+        "```\n\n"
+        "Pick the command that prints the working directory.\n"
+    )
+
+    with pytest.raises(ValueError, match="answers must be drawn from options"):
+        load_tutorial_file(tutorial_path)
 @
 
 
@@ -735,6 +889,114 @@ def optional_string(value: object, context: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context} must be a non-empty string when set.")
     return value.strip()
+@
+
+Question steps use literal options, while free-text input steps reuse the
+existing recorded-text matcher schema for their answers.  Keeping those
+helpers separate lets the loader reject mismatched combinations early.
+
+<<functions>>=
+def option_tuple(value: object, context: str) -> tuple[str, ...]:
+    """Return ``value`` as a tuple of option strings."""
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a YAML list of strings.")
+
+    return tuple(require_non_empty_string(item, f"{context} item") for item in value)
+@
+
+<<functions>>=
+def require_non_empty_string(value: object, context: str) -> str:
+    """Return ``value`` as one non-empty string."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context} must be a non-empty string.")
+    return value.strip()
+@
+
+<<functions>>=
+def literal_answer_tuple(value: object, context: str) -> tuple[str, ...]:
+    """Return ``value`` as a tuple of literal answer strings."""
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a YAML list of strings.")
+
+    return tuple(require_non_empty_string(item, f"{context} item") for item in value)
+@
+
+<<functions>>=
+def step_answers(
+    metadata: dict,
+    title: str,
+    kind: str | None,
+) -> tuple[str | TextMatch, ...]:
+    """Return the parsed answers tuple for one step."""
+
+    context = f"Step {title!r} answers"
+    if kind == "input":
+        return text_match_tuple(metadata.get("answers"), context)
+    if kind in {"single_select", "multi_select"}:
+        return literal_answer_tuple(metadata.get("answers"), context)
+    return ()
+@
+
+We validate missing-[[kind]] errors from the authored metadata keys rather
+than only from the parsed tuples.  That way a stray [[answers:]] field is
+still rejected even though the loader does not yet know how to interpret it.
+
+<<functions>>=
+def validate_step_shape(
+    title: str,
+    *,
+    kind: str | None,
+    has_options: bool,
+    has_answers: bool,
+    options: tuple[str, ...],
+    answers: tuple[str | TextMatch, ...],
+    edit_file: str | None,
+) -> None:
+    """Reject unsupported step metadata combinations."""
+
+    context = f"Step {title!r}"
+    allowed_kinds = {None, "input", "multi_select", "single_select"}
+    if kind not in allowed_kinds:
+        raise ValueError(
+            f"{context} kind must be 'input', 'single_select', or "
+            "'multi_select'."
+        )
+    if kind is not None and edit_file is not None:
+        raise ValueError(f"{context} cannot combine kind with edit_file.")
+    if kind is None:
+        if has_options:
+            raise ValueError(f"{context} options require kind.")
+        if has_answers:
+            raise ValueError(f"{context} answers require kind.")
+        return
+
+    if kind == "input":
+        if options:
+            raise ValueError(f"{context} input steps do not support options.")
+        if not answers:
+            raise ValueError(f"{context} input steps require answers.")
+        return
+
+    if not options:
+        raise ValueError(f"{context} {kind} steps require options.")
+    if not answers:
+        raise ValueError(f"{context} {kind} steps require answers.")
+
+    unknown_answers = [answer for answer in answers if answer not in options]
+    if unknown_answers:
+        names = ", ".join(repr(answer) for answer in unknown_answers)
+        raise ValueError(f"{context} answers must be drawn from options: {names}.")
+    if kind == "single_select" and len(answers) != 1:
+        raise ValueError(f"{context} single_select steps require exactly one answer.")
+    if kind == "multi_select" and len(set(answers)) != len(answers):
+        raise ValueError(f"{context} multi_select answers must not repeat options.")
 @
 
 <<functions>>=

@@ -41,6 +41,7 @@ from typer.testing import CliRunner
 from tutorial.cli import *
 from tutorial.model import StepTranscript
 from tutorial.model import Tutorial
+from tutorial.model import TutorialStep
 from tutorial.run import write_demo_tutorial
 from tutorial.shell import EditorResult
 from tutorial.shell import run_scripted_shell
@@ -78,10 +79,13 @@ from rich.markdown import Markdown
 from rich.table import Table
 import typer
 
+from tutorial.model import step_kind
 from tutorial.run import RunResult
 from tutorial.run import TutorialRunner
 from tutorial.shell import run_editor
 from tutorial.shell import run_interactive_shell
+from tutorial.shell import ShellResult
+from tutorial.shell import utc_now
 from tutorial.state import ProgressState
 from tutorial.state import StateStore
 @
@@ -101,6 +105,7 @@ def build_runner(
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
     allow_shell_checks: bool = False,
 ) -> TutorialRunner:
     """Build a tutorial runner for one CLI host namespace."""
@@ -110,6 +115,7 @@ def build_runner(
         TutorialCatalog(tutorial_paths),
         shell_runner=shell_runner,
         editor_runner=editor_runner,
+        question_runner=question_runner,
         allow_shell_checks=allow_shell_checks,
     )
 @
@@ -812,8 +818,38 @@ workspace line, the instructions, and the interaction reminder blur
 together into one dense block of text.
 
 The reminder itself depends on the step mode.  Shell steps ask the
-student to exit the shell, while editor steps ask them to save and quit
-the editor.
+student to exit the shell, editor steps ask them to save and quit the
+editor, and question steps tell them how to answer directly in the CLI.
+
+<<functions>>=
+def question_step_prompt(step) -> str:
+    """Return the prompt string used to capture one question answer."""
+
+    kind = step_kind(step)
+    if kind == "input":
+        return "Answer"
+    if kind == "single_select":
+        return "Choose one option"
+    if kind == "multi_select":
+        return "Choose all that apply"
+    raise ValueError(f"Step {step.title!r} is not a question step.")
+@
+
+<<functions>>=
+def render_question_options(
+    console: Console,
+    options: tuple[str, ...],
+) -> None:
+    """Render the authored options for a select-style question step."""
+
+    if not options:
+        return
+
+    console.print("Options:", style="bold")
+    for index, option in enumerate(options, start=1):
+        console.print(f"  {index}. {option}")
+    console.print()
+@
 
 <<functions>>=
 def render_step_prompt(
@@ -825,9 +861,14 @@ def render_step_prompt(
     instructions: str,
     workspace: str,
     *,
+    kind: str | None = None,
+    options: tuple[str, ...] = (),
     edit_file: str | None = None,
 ) -> None:
     """Render the prompt shown before one interactive step."""
+
+    if kind is None:
+        kind = "editor" if edit_file is not None else "shell"
 
     console.print()
     console.print(tutorial_title, style="bold")
@@ -841,17 +882,36 @@ def render_step_prompt(
     console.print()
     console.print(Markdown(instructions))
     console.print()
-    if edit_file is None:
+    if kind == "shell":
         console.print(
             "Exit the shell when you want the tutorial to validate the step.",
             style="dim",
         )
-    else:
+    elif kind == "editor":
         console.print(
             "Save the file and quit the editor when you want the tutorial "
             "to validate the step.",
             style="dim",
         )
+    elif kind == "input":
+        console.print(
+            "Type your answer on one line when you are ready.",
+            style="dim",
+        )
+    elif kind == "single_select":
+        render_question_options(console, options)
+        console.print(
+            "Answer with an option number or the full option text.",
+            style="dim",
+        )
+    elif kind == "multi_select":
+        render_question_options(console, options)
+        console.print(
+            "Answer with option numbers or texts separated by commas.",
+            style="dim",
+        )
+    else:
+        raise ValueError(f"Unsupported step kind: {kind!r}")
     console.print()
 @
 
@@ -907,6 +967,34 @@ def test_render_step_prompt_mentions_editor_file_when_needed():
     output = buffer.getvalue()
     assert "File: notes.txt" in output
     assert "Save the file and quit the editor" in output
+
+
+def test_render_step_prompt_lists_single_select_options():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+
+    render_step_prompt(
+        console,
+        "Shell Basics",
+        5,
+        7,
+        "Pick the listing command",
+        "Choose the command that lists directory contents.",
+        "/tmp/demo",
+        kind="single_select",
+        options=("pwd", "cd", "ls"),
+    )
+
+    output = buffer.getvalue()
+    assert "Options:" in output
+    assert "1. pwd" in output
+    assert "3. ls" in output
+    assert "Answer with an option number or the full option text." in output
 @
 
 
@@ -964,6 +1052,149 @@ def prompt_to_start_editor(
             )
             continue
         console.print("Answer yes or no.", style="dim")
+@
+
+
+\section{Normalising question answers}
+
+Question steps still persist ordinary transcript text, so the CLI only has
+to turn user-facing conveniences such as option numbers into a stable
+recorded form before handing the result to the runner.
+
+<<functions>>=
+def resolve_question_choice(choice: str, options: tuple[str, ...]) -> str | None:
+    """Return the authored option addressed by ``choice``."""
+
+    token = choice.strip()
+    if not token:
+        return None
+    if token.isdigit():
+        index = int(token) - 1
+        if 0 <= index < len(options):
+            return options[index]
+        return None
+    for option in options:
+        if token == option:
+            return option
+    return None
+@
+
+<<functions>>=
+def normalise_question_answer(step, answer: str) -> str | None:
+    """Return a stable recorded answer for one question step."""
+
+    kind = step_kind(step)
+    if kind == "input":
+        return answer.strip()
+    if kind == "single_select":
+        return resolve_question_choice(answer, step.options)
+    if kind == "multi_select":
+        selections = []
+        seen = set()
+        for token in answer.split(","):
+            choice = resolve_question_choice(token, step.options)
+            if choice is None:
+                return None
+            if choice in seen:
+                continue
+            seen.add(choice)
+            selections.append(choice)
+        if not selections:
+            return None
+        return "\n".join(
+            option for option in step.options if option in seen
+        )
+    raise ValueError(f"Step {step.title!r} is not a question step.")
+@
+
+<<functions>>=
+def run_question_step(
+    step,
+    *,
+    prompt_for_input: Callable[[str], str],
+    console: Console,
+) -> ShellResult:
+    """Prompt once for a question step and return a recorded result."""
+
+    started_at = utc_now()
+    while True:
+        raw_answer = prompt_for_input(question_step_prompt(step))
+        answer = normalise_question_answer(step, raw_answer)
+        if answer is not None:
+            return ShellResult(
+                started_at=started_at,
+                ended_at=utc_now(),
+                exit_status=0,
+                transcript=answer,
+            )
+        console.print("Answer using the listed options.", style="dim")
+@
+
+<<test functions>>=
+def test_normalise_question_answer_accepts_single_select_numbers():
+    step = TutorialStep(
+        title="Pick one",
+        instructions="Choose the listing command.",
+        kind="single_select",
+        options=("pwd", "cd", "ls"),
+        answers=("ls",),
+    )
+
+    assert normalise_question_answer(step, "3") == "ls"
+    assert normalise_question_answer(step, "ls") == "ls"
+    assert normalise_question_answer(step, "4") is None
+
+
+def test_normalise_question_answer_orders_multi_select_by_authored_options():
+    step = TutorialStep(
+        title="Pick all that apply",
+        instructions="Choose every inspection command.",
+        kind="multi_select",
+        options=("pwd", "ls", "mkdir"),
+        answers=("pwd", "mkdir"),
+    )
+
+    assert normalise_question_answer(step, "2, 1") == "pwd\nls"
+    assert normalise_question_answer(step, "pwd, mkdir") == "pwd\nmkdir"
+    assert normalise_question_answer(step, "pwd, nope") is None
+
+
+def test_run_question_step_reprompts_after_invalid_selection():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=80,
+        force_terminal=False,
+        color_system=None,
+    )
+    step = TutorialStep(
+        title="Pick one",
+        instructions="Choose the listing command.",
+        kind="single_select",
+        options=("pwd", "cd", "ls"),
+        answers=("ls",),
+    )
+    answers = iter(["9", "3"])
+
+    result = run_question_step(
+        step,
+        prompt_for_input=lambda prompt: next(answers),
+        console=console,
+    )
+
+    assert result.transcript == "ls"
+    assert "Answer using the listed options." in buffer.getvalue()
+
+
+def test_run_question_step_accepts_trimmed_input_answers():
+    step = TutorialStep(
+        title="Type the command",
+        instructions="Type the command shown in the lesson.",
+        kind="input",
+        answers=(),
+    )
+
+    assert normalise_question_answer(step, "  pwd  ") == "pwd"
 @
 
 <<test functions>>=
@@ -1157,6 +1388,8 @@ def handle_blocked_step(
                 result.blocked_step.title,
                 result.blocked_step.instructions,
                 result.run.workspace,
+                kind=step_kind(result.blocked_step),
+                options=result.blocked_step.options,
                 edit_file=result.blocked_step.edit_file,
             )
             continue
@@ -1299,11 +1532,22 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
             text="tutorial\n",
         )
 
+    answers = iter(["pwd", "ls", "pwd\nls"])
+
+    def fake_question_runner(*, step):
+        return ShellResult(
+            started_at="2026-01-01T00:00:02+00:00",
+            ended_at="2026-01-01T00:00:03+00:00",
+            exit_status=0,
+            transcript=next(answers),
+        )
+
     tutorial_runner = build_runner(
         state_root=tmp_path / "state",
         tutorial_paths=(tutorial_path,),
         shell_runner=scripted_runner,
         editor_runner=fake_editor_runner,
+        question_runner=fake_question_runner,
         allow_shell_checks=True,
     )
     buffer = StringIO()
@@ -1649,6 +1893,7 @@ def create_app(
     tutorial_path_provider: Callable[[], tuple[str | Path, ...]] | None = None,
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Create a Typer application for tutorials."""
@@ -1676,6 +1921,7 @@ def create_app(
         command_tutorial_paths: tuple[str | Path, ...] = (),
         command_allow_shell_checks: bool = False,
         require_paths: bool = False,
+        question_runner_override: Callable[..., ShellResult] | None = None,
     ) -> TutorialRunner:
         paths = effective_tutorial_paths(
             configured_tutorial_paths(),
@@ -1689,6 +1935,7 @@ def create_app(
             tutorial_paths=paths,
             shell_runner=shell_runner,
             editor_runner=editor_runner,
+            question_runner=question_runner_override or question_runner,
             allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
         )
 
@@ -1798,16 +2045,28 @@ def create_app(
                 step.title,
                 step.instructions,
                 run.workspace,
+                kind=step_kind(step),
+                options=step.options,
                 edit_file=step.edit_file,
             )
             if step.edit_file is not None:
                 prompt_to_start_editor(console, prompt_for_editor_start)
+
+        def command_question_runner(*, step):
+            if question_runner is not None:
+                return question_runner(step=step)
+            return run_question_step(
+                step,
+                prompt_for_input=prompt_for_input,
+                console=console,
+            )
 
         try:
             tutorial_runner = runner(
                 command_tutorial_paths=tuple(tutorial_path or ()),
                 command_allow_shell_checks=allow_shell_checks_flag,
                 require_paths=True,
+                question_runner_override=command_question_runner,
             )
             result = run_tutorial_with_menu(
                 tutorial_runner,
@@ -1888,6 +2147,7 @@ def create_standalone_app(
     state_root: str | Path | None = None,
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Create the standalone tutorial CLI."""
@@ -1898,6 +2158,7 @@ def create_standalone_app(
         tutorial_path_provider=standalone_tutorial_paths,
         shell_runner=shell_runner,
         editor_runner=editor_runner,
+        question_runner=question_runner,
         allow_shell_checks=allow_shell_checks,
     )
 
@@ -2125,12 +2386,15 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
             "--allow-shell-checks",
             "shell-basics",
         ],
-        input="try again\n\n",
+        input="try again\n\npwd\n3\n2, 1\n",
     )
 
     assert result.exit_code == 0
     assert "Step not complete yet: Inspect the workspace" in result.stdout
     assert "Start the editor? [Y/n]" in result.stdout
+    assert "Type your answer on one line when you are ready." in result.stdout
+    assert "Answer with an option number or the full option text." in result.stdout
+    assert "Answer with option numbers or texts separated by commas." in result.stdout
     assert "Completed shell-basics" in result.stdout
 @
 
@@ -2206,6 +2470,7 @@ def add_typer_subcommand(
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
     allow_shell_checks: bool = False,
 ) -> typer.Typer:
     """Attach the tutorial CLI as a Typer subcommand."""
@@ -2216,6 +2481,7 @@ def add_typer_subcommand(
         tutorial_paths=embedded_tutorial_paths(tutorial_paths),
         shell_runner=shell_runner,
         editor_runner=editor_runner,
+        question_runner=question_runner,
         allow_shell_checks=allow_shell_checks,
     )
     parent_app.add_typer(child_app, name=name)
@@ -2317,6 +2583,7 @@ def add_argparse_subcommand(
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
     allow_shell_checks: bool = False,
 ) -> argparse.ArgumentParser:
     """Attach the tutorial CLI as an argparse subcommand tree."""
@@ -2383,6 +2650,7 @@ def add_argparse_subcommand(
             tutorial_paths=embedded_tutorial_paths(tutorial_paths),
             shell_runner=shell_runner,
             editor_runner=editor_runner,
+            question_runner=question_runner,
             allow_shell_checks=allow_shell_checks,
         )
     )
@@ -2608,11 +2876,26 @@ def argparse_run_command(
     tutorial_paths: tuple[str | Path, ...],
     shell_runner: Callable[..., object],
     editor_runner: Callable[..., object],
+    question_runner: Callable[..., ShellResult] | None,
     allow_shell_checks: bool,
 ) -> int:
     """Implement the argparse ``run`` subcommand."""
 
     try:
+        console = Console()
+
+        def prompt_for_input(prompt: str) -> str:
+            return input(f"{prompt}: ")
+
+        def command_question_runner(*, step):
+            if question_runner is not None:
+                return question_runner(step=step)
+            return run_question_step(
+                step,
+                prompt_for_input=prompt_for_input,
+                console=console,
+            )
+
         tutorial_runner = build_runner(
             namespace=namespace,
             state_root=state_root,
@@ -2624,12 +2907,9 @@ def argparse_run_command(
             ),
             shell_runner=shell_runner,
             editor_runner=editor_runner,
+            question_runner=command_question_runner,
             allow_shell_checks=allow_shell_checks or args.allow_shell_checks,
         )
-        console = Console()
-
-        def prompt_for_input(prompt: str) -> str:
-            return input(f"{prompt}: ")
 
         def before_step(tutorial, step_index, step, run) -> None:
             render_step_prompt(
@@ -2640,6 +2920,8 @@ def argparse_run_command(
                 step.title,
                 step.instructions,
                 run.workspace,
+                kind=step_kind(step),
+                options=step.options,
                 edit_file=step.edit_file,
             )
             if step.edit_file is not None:
@@ -2665,4 +2947,71 @@ def argparse_run_command(
     except typer.Exit as error:
         return error.exit_code
     return 0
+@
+
+<<test functions>>=
+def test_argparse_run_command_handles_question_steps(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    commands = iter(
+        [
+            "pwd\n",
+            "pwd\nls\n",
+            "touch notes.txt\n",
+            "cat notes.txt\n",
+        ]
+    )
+
+    def scripted_runner(*, workspace, prompt_name="tutorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
+
+    def fake_editor_runner(*, workspace, relative_path, initial_text=None):
+        file_path = Path(workspace) / relative_path
+        file_path.write_text("tutorial\n")
+        return EditorResult(
+            started_at="2026-01-01T00:00:01+00:00",
+            ended_at="2026-01-01T00:00:02+00:00",
+            exit_status=0,
+            file_path=str(file_path),
+            text="tutorial\n",
+        )
+
+    answers = iter(["try again", "", "pwd", "3", "2, 1"])
+
+    def fake_input(prompt=""):
+        print(prompt, end="")
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = argparse_run_command(
+        argparse.Namespace(
+            tutorial_path=[str(tutorial_path)],
+            allow_shell_checks=True,
+            tutorial_id="shell-basics",
+            restart=False,
+        ),
+        namespace="tutorial",
+        state_root=tmp_path / "state",
+        tutorial_paths=(),
+        shell_runner=scripted_runner,
+        editor_runner=fake_editor_runner,
+        question_runner=None,
+        allow_shell_checks=False,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Step not complete yet: Inspect the workspace" in captured.out
+    assert "Start the editor? [Y/n]" in captured.out
+    assert "Choose one option" in captured.out
+    assert "Choose all that apply" in captured.out
+    assert "Completed shell-basics" in captured.out
 @

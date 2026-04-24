@@ -1,7 +1,7 @@
 ---
 id: writing-tutorials
 title: Writing Tutorials
-summary: Create a tutorial file, contrast contains and regex matches, and load it.
+summary: Create a tutorial file, add shell, editor, and question steps, and load it.
 ---
 
 # Create a tutorial directory
@@ -48,8 +48,8 @@ Run `echo hello`.
 This is the smallest useful tutorial: front matter plus one top-level
 step.
 
-Because this step has no `edit_file` and no metadata fence, the tutorial
-runner will open a shell for it.
+Because this step has no `kind`, no `edit_file`, and no metadata fence,
+the tutorial runner will open a shell for it.
 
 # Load the tutorial from disk
 
@@ -90,7 +90,7 @@ Run `echo hello`.
 
 Only one aspect changed: the step now has an explicit validation rule.
 It is still a shell step, because the metadata fence adds
-`required_patterns` but still does not add `edit_file`.
+`required_patterns` but still does not add `kind` or `edit_file`.
 
 A bare string uses the default `contains` mode. That mode is the best
 default because the runner strips ANSI control noise and collapses
@@ -156,8 +156,115 @@ Open `hello.txt` and add `hello from the editor`.
 
 This now contrasts two different step backends in the same tutorial: a
 shell step with explicit matching metadata and an editor-backed step with
-`edit_file`. In this format, `edit_file` is the switch: without it the
-runner starts a shell, and with it the runner opens an editor.
+`edit_file`. `edit_file` still selects the editor backend, while question
+steps use `kind`.
+
+# Add an input question
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "# Type the greeting"
+  - "kind: input"
+  - "answers:"
+  - "  - mode: regex"
+  - "    pattern: (?i)hello(?:\\s+)?$"
+```
+
+Add this third step to the same file:
+
+````md
+# Type the greeting
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: (?i)hello(?:\s+)?$
+```
+
+Type `hello`.
+````
+
+Input questions reuse the same string-or-regex answer format as
+`required_patterns`. Only the interaction kind changes: the runner now
+prompts for one line of text instead of opening a shell or editor.
+
+# Add a single-select question
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "# Pick the shell command"
+  - "kind: single_select"
+  - "options:"
+  - "  - echo hello"
+  - "  - pwd"
+  - "  - ls"
+  - "answers:"
+  - "  - echo hello"
+```
+
+Add this fourth step to the same file:
+
+````md
+# Pick the shell command
+
+```tutorial-step
+kind: single_select
+options:
+  - echo hello
+  - pwd
+  - ls
+answers:
+  - echo hello
+```
+
+Choose the command that prints the greeting.
+````
+
+Single-select questions use literal option text. The learner may answer by
+number or by the full option, but the authored answer stays the option
+text itself.
+
+# Add a multi-select question
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "# Pick every inspection command"
+  - "kind: multi_select"
+  - "options:"
+  - "  - pwd"
+  - "  - ls"
+  - "  - echo hello"
+  - "answers:"
+  - "  - pwd"
+  - "  - ls"
+```
+
+Add this fifth step to the same file:
+
+````md
+# Pick every inspection command
+
+```tutorial-step
+kind: multi_select
+options:
+  - pwd
+  - ls
+  - echo hello
+answers:
+  - pwd
+  - ls
+```
+
+Choose every command that inspects the workspace.
+````
+
+Multi-select questions also use literal YAML lists. The learner may choose
+the correct options in any order, but authors still list the correct
+option texts explicitly under `answers`.
 
 # Test the tutorial you wrote
 
@@ -171,10 +278,11 @@ hint: Start `greeting`, then leave its first shell with `exit`.
 
 Run `tutorial run --tutorial-path my-tutorials greeting`.
 
-This tests a different aspect from `tutorial list --tutorial-path
+This still tests a different aspect from `tutorial list --tutorial-path
 my-tutorials`. Listing only proves that the file parses and the tutorial is
-discoverable. Running it proves that the authored step actually starts and
-uses the expected shell backend.
+discoverable. Running it proves that the authored tutorial still starts
+with the expected shell backend even after you add editor and question
+steps later in the file.
 
 Keep the tutorial file itself invariant here. Only the command changes: you
 now move from inspecting tutorial metadata to exercising the authored
@@ -194,9 +302,11 @@ required_patterns:
   - tutorial list --tutorial-path my-tutorials
   - greeting
   - cat my-tutorials/greeting.md
-  - "  - mode: regex"
-  - '    pattern: (?m)echo hello(?:\\s+)?$'
+  - "kind: input"
+  - "kind: single_select"
+  - "kind: multi_select"
   - "edit_file: hello.txt"
+  - "    pattern: (?i)hello(?:\\s+)?$"
 hint: List the tutorials, then display the file you wrote.
 ```
 
@@ -207,4 +317,5 @@ At this point you have checked the same tutorial in three different ways:
 
 - `tutorial list --tutorial-path my-tutorials` shows that it loads
 - `tutorial run --tutorial-path my-tutorials greeting` shows that it runs
-- `cat my-tutorials/greeting.md` lets you inspect the final source directly
+- `cat my-tutorials/greeting.md` lets you inspect the final shell, editor,
+  and question metadata directly

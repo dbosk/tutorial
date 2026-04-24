@@ -3,12 +3,12 @@
 
 The model layer answers two questions.  First, what information do we
 need to describe a tutorial step?  Second, what information do we need
-to preserve after the student has interacted with the shell?
+to preserve after the student has interacted with the tutorial?
 
 We keep the answer deliberately small.  A step has human-facing text,
-may optionally open a file in an editor, and carries one or two
-machine-checkable expectations; a run stores the recorded text that was
-produced while the student worked through the tutorial.
+chooses one interaction kind, and carries one or two machine-checkable
+expectations; a run stores the recorded text that was produced while the
+student worked through the tutorial.
 
 
 \section{Code overview}
@@ -19,6 +19,7 @@ produced while the student worked through the tutorial.
 <<imports>>
 
 <<classes>>
+<<functions>>
 @
 
 <<test [[model.py]]>>=
@@ -50,9 +51,11 @@ The student needs a title and instructions, while the runner needs a
 small, explicit check that tells it whether the student can move on.
 
 The step also needs one small interaction choice.  Most steps still open
-an interactive shell, but some tasks are clearer in an editor.  An
-optional file path is enough to distinguish those editor-backed steps
-without introducing a larger action language in the first release.
+an interactive shell, but some tasks are clearer in an editor or are best
+asked directly as authored questions.  We keep that interaction model
+explicit but small: shell remains the default, editor steps still carry
+an optional file path, and question steps add a kind plus a small answer
+schema.
 
 The student-facing prose is still stored as plain strings, but we author
 those strings as Markdown.  That gives the CLI room to render short
@@ -73,11 +76,12 @@ The combination stays simple but covers the first release well.  Some
 steps are best recognised from what the student typed, while others are
 best recognised from the files they created.
 
-Plain strings remain the default because they are easy to author and read.
-The runner can still treat those strings a little more forgivingly than a
-raw byte-for-byte substring check by collapsing whitespace and removing
-shell control noise.  That avoids brittle failures from harmless prompt or
-completion variations while keeping the tutorial authoring format small.
+Plain strings remain the default because they are easy to author and
+read.  The runner can still treat those strings a little more forgivingly
+than a raw byte-for-byte substring check by collapsing whitespace and
+removing shell control noise.  That avoids brittle failures from harmless
+prompt or completion variations while keeping the tutorial authoring
+format small.
 
 When a step genuinely needs more control, we also allow an explicit match
 mode in the form of a small mapping.  That keeps regular expressions
@@ -99,10 +103,28 @@ class TutorialStep:
 
     title: str
     instructions: str
+    kind: str | None = None
+    options: tuple[str, ...] = ()
+    answers: tuple[str | TextMatch, ...] = ()
     required_patterns: tuple[TextMatch, ...] = ()
     check_command: str | None = None
     hint: str | None = None
     edit_file: str | None = None
+@
+
+Shell remains the implicit default so existing step definitions and test
+fixtures stay valid.  Editor steps can still be recognised from
+[[edit_file]], while question steps set [[kind]] explicitly.
+
+<<functions>>=
+def step_kind(step: TutorialStep) -> str:
+    """Return the effective interaction kind for ``step``."""
+
+    if step.kind is not None:
+        return step.kind
+    if step.edit_file is not None:
+        return "editor"
+    return "shell"
 @
 
 Let's verify that a step can carry both transcript checks and a shell
@@ -129,6 +151,30 @@ def test_tutorial_step_can_request_editor_file():
     )
 
     assert step.edit_file == "notes.txt"
+
+
+def test_step_kind_treats_legacy_editor_steps_as_editor():
+    step = TutorialStep(
+        title="Edit a file",
+        instructions="Open notes.txt and update it.",
+        edit_file="notes.txt",
+    )
+
+    assert step_kind(step) == "editor"
+
+
+def test_tutorial_step_can_describe_multiple_choice_questions():
+    step = TutorialStep(
+        title="Choose a command",
+        instructions="Pick the command that prints the working directory.",
+        kind="single_select",
+        options=("pwd", "cd", "ls"),
+        answers=("pwd",),
+    )
+
+    assert step_kind(step) == "single_select"
+    assert step.options == ("pwd", "cd", "ls")
+    assert step.answers == ("pwd",)
 @
 
 
