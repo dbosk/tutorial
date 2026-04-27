@@ -1898,239 +1898,299 @@ def create_app(
 ) -> typer.Typer:
     """Create a Typer application for tutorials."""
 
-    application = typer.Typer(
-        help="Run interactive command-line tutorials.",
-        invoke_without_command=True,
-    )
-
-    @application.callback(invoke_without_command=True)
-    def app_callback(ctx: typer.Context) -> None:
-        """Show help when the tutorial group is invoked without a command."""
-
-        if ctx.invoked_subcommand is None:
-            typer.echo(ctx.get_help())
-            raise typer.Exit(code=0)
-
-    def configured_tutorial_paths() -> tuple[str | Path, ...]:
-        if tutorial_path_provider is not None:
-            return tuple(tutorial_path_provider())
-        return tuple(tutorial_paths)
-
-    def runner(
-        *,
-        command_tutorial_paths: tuple[str | Path, ...] = (),
-        command_allow_shell_checks: bool = False,
-        require_paths: bool = False,
-        question_runner_override: Callable[..., ShellResult] | None = None,
-    ) -> TutorialRunner:
-        paths = effective_tutorial_paths(
-            configured_tutorial_paths(),
-            command_tutorial_paths,
-        )
-        if require_paths:
-            paths = require_tutorial_paths(paths)
-        return build_runner(
-            namespace=namespace,
-            state_root=state_root,
-            tutorial_paths=paths,
-            shell_runner=shell_runner,
-            editor_runner=editor_runner,
-            question_runner=question_runner_override or question_runner,
-            allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
-        )
-
-    def run_tutorial_id_completion(ctx, incomplete: str) -> list[str]:
-        command_paths = tuple(ctx.params.get("tutorial_path") or ())
-        return suggest_run_tutorial_ids(
-            configured_tutorial_paths(),
-            command_paths,
-            incomplete,
-        )
-
-    def review_tutorial_id_completion(incomplete: str) -> list[str]:
-        return suggest_review_tutorial_ids(
-            namespace=namespace,
-            state_root=state_root,
-            incomplete=incomplete,
-        )
-
-    def review_run_id_completion(ctx, incomplete: str) -> list[str]:
-        tutorial_id = ctx.params.get("tutorial_id")
-        if not isinstance(tutorial_id, str):
-            return []
-        return suggest_review_run_ids(
-            tutorial_id,
-            namespace=namespace,
-            state_root=state_root,
-            incomplete=incomplete,
-        )
-
-    @application.command("list")
-    def list_command(
-        tutorial_path: Annotated[
-            list[Path] | None,
-            typer.Option(
-                "--tutorial-path",
-                help=(
-                    "Path to a tutorial Markdown file or directory. "
-                    "Repeat to add more paths."
-                ),
-            ),
-        ] = None,
-    ) -> None:
-        """List the loaded tutorials and their saved progress."""
-
-        console = Console()
-        try:
-            tutorial_runner = runner(
-                command_tutorial_paths=tuple(tutorial_path or ()),
-                require_paths=True,
-            )
-        except (RuntimeError, ValueError) as error:
-            typer.echo(str(error), err=True)
-            raise typer.Exit(code=1)
-
-        render_tutorial_list(console, tutorial_runner.list_tutorials())
-
-    @application.command("run")
-    def run_command(
-        tutorial_id: str = typer.Argument(
-            ...,
-            autocompletion=run_tutorial_id_completion,
-        ),
-        tutorial_path: Annotated[
-            list[Path] | None,
-            typer.Option(
-                "--tutorial-path",
-                help=(
-                    "Path to a tutorial Markdown file or directory. "
-                    "Repeat to add more paths."
-                ),
-            ),
-        ] = None,
-        restart: Annotated[
-            bool,
-            typer.Option(
-                "--restart",
-                help="Start a fresh run instead of resuming saved progress.",
-            ),
-        ] = False,
-        allow_shell_checks_flag: Annotated[
-            bool,
-            typer.Option(
-                "--allow-shell-checks",
-                help=(
-                    "Trust tutorial-authored shell validation commands for "
-                    "this run."
-                ),
-            ),
-        ] = False,
-    ) -> None:
-        """Run or resume one tutorial."""
-
-        console = Console()
-
-        def prompt_for_input(prompt: str) -> str:
-            return typer.prompt(prompt)
-
-        def prompt_for_editor_start(prompt: str) -> str:
-            return typer.prompt(prompt, default="", show_default=False)
-
-        def before_step(tutorial, step_index, step, run) -> None:
-            render_step_prompt(
-                console,
-                tutorial.title,
-                step_index + 1,
-                len(tutorial.steps),
-                step.title,
-                step.instructions,
-                run.workspace,
-                kind=step_kind(step),
-                options=step.options,
-                edit_file=step.edit_file,
-            )
-            if step.edit_file is not None:
-                prompt_to_start_editor(console, prompt_for_editor_start)
-
-        def command_question_runner(*, step):
-            if question_runner is not None:
-                return question_runner(step=step)
-            return run_question_step(
-                step,
-                prompt_for_input=prompt_for_input,
-                console=console,
-            )
-
-        try:
-            tutorial_runner = runner(
-                command_tutorial_paths=tuple(tutorial_path or ()),
-                command_allow_shell_checks=allow_shell_checks_flag,
-                require_paths=True,
-                question_runner_override=command_question_runner,
-            )
-            result = run_tutorial_with_menu(
-                tutorial_runner,
-                tutorial_id,
-                restart=restart,
-                before_step=before_step,
-                console=console,
-                prompt_for_input=prompt_for_input,
-            )
-        except KeyError as error:
-            raise typer.BadParameter(str(error), param_hint="tutorial_id")
-        except (RuntimeError, ValueError) as error:
-            typer.echo(str(error), err=True)
-            raise typer.Exit(code=1)
-
-        if result.blocked_step is not None:
-            raise typer.Exit(code=1)
-
-        emit_run_summary(result)
-
-    @application.command("review")
-    def review_command(
-        tutorial_id: str = typer.Argument(
-            ...,
-            autocompletion=review_tutorial_id_completion,
-        ),
-        step: Annotated[
-            int | None,
-            typer.Option(
-                "--step",
-                min=1,
-                help="Review only the latest transcript for one step.",
-            ),
-        ] = None,
-        run_id: str | None = typer.Option(
-            None,
-            "--run-id",
-            help="Review a specific saved run instead of the latest one.",
-            autocompletion=review_run_id_completion,
-        ),
-    ) -> None:
-        """Review saved transcripts for one tutorial."""
-
-        console = Console()
-        try:
-            tutorial_runner = runner()
-            tutorial, run, transcripts = tutorial_runner.review(
-                tutorial_id,
-                step_number=step,
-                run_id=run_id,
-            )
-        except (KeyError, IndexError, ValueError) as error:
-            typer.echo(str(error), err=True)
-            raise typer.Exit(code=1)
-
-        render_review_output(
-            console,
-            tutorial.title,
-            run.run_id,
-            run.workspace,
-            transcripts,
-        )
+    <<create Typer application shell>>
+    <<register help callback>>
+    <<define shared tutorial path resolution>>
+    <<define shared runner factory>>
+    <<define completion callbacks>>
+    <<register list command>>
+    <<register run command>>
+    <<register review command>>
 
     return application
+@
+
+The factory starts by creating the Typer shell once.  Every later section adds
+one concern to that shell: first the group callback, then shared helpers, and
+finally the user-facing commands.
+
+<<create Typer application shell>>=
+application = typer.Typer(
+    help="Run interactive command-line tutorials.",
+    invoke_without_command=True,
+)
+@
+
+The help callback belongs close to the application shell because it changes the
+group's default behaviour, not one specific command.
+
+<<register help callback>>=
+@application.callback(invoke_without_command=True)
+def app_callback(ctx: typer.Context) -> None:
+    """Show help when the tutorial group is invoked without a command."""
+
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(code=0)
+@
+
+Each command resolves its own extra tutorial paths, but the configured base
+paths come from one place.  Keeping that logic in one closure lets tests and
+embedding hosts override the source without repeating the fallback rule.
+
+<<define shared tutorial path resolution>>=
+def configured_tutorial_paths() -> tuple[str | Path, ...]:
+    if tutorial_path_provider is not None:
+        return tuple(tutorial_path_provider())
+    return tuple(tutorial_paths)
+@
+
+Every command eventually needs the same runner wiring: combine tutorial paths,
+optionally require at least one path, and thread through the chosen backends.
+One local factory keeps that invariant explicit while still letting each
+command supply its own overrides.
+
+<<define shared runner factory>>=
+def runner(
+    *,
+    command_tutorial_paths: tuple[str | Path, ...] = (),
+    command_allow_shell_checks: bool = False,
+    require_paths: bool = False,
+    question_runner_override: Callable[..., ShellResult] | None = None,
+) -> TutorialRunner:
+    paths = effective_tutorial_paths(
+        configured_tutorial_paths(),
+        command_tutorial_paths,
+    )
+    if require_paths:
+        paths = require_tutorial_paths(paths)
+    return build_runner(
+        namespace=namespace,
+        state_root=state_root,
+        tutorial_paths=paths,
+        shell_runner=shell_runner,
+        editor_runner=editor_runner,
+        question_runner=question_runner_override or question_runner,
+        allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
+    )
+@
+
+Completion callbacks are small, but they share the same configuration context
+as the commands themselves.  Defining them here keeps the command signatures
+compact without hiding where their data comes from.
+
+<<define completion callbacks>>=
+def run_tutorial_id_completion(ctx, incomplete: str) -> list[str]:
+    command_paths = tuple(ctx.params.get("tutorial_path") or ())
+    return suggest_run_tutorial_ids(
+        configured_tutorial_paths(),
+        command_paths,
+        incomplete,
+    )
+
+
+def review_tutorial_id_completion(incomplete: str) -> list[str]:
+    return suggest_review_tutorial_ids(
+        namespace=namespace,
+        state_root=state_root,
+        incomplete=incomplete,
+    )
+
+
+def review_run_id_completion(ctx, incomplete: str) -> list[str]:
+    tutorial_id = ctx.params.get("tutorial_id")
+    if not isinstance(tutorial_id, str):
+        return []
+    return suggest_review_run_ids(
+        tutorial_id,
+        namespace=namespace,
+        state_root=state_root,
+        incomplete=incomplete,
+    )
+@
+
+The list command is the smallest consumer of the shared runner: it only needs
+the loaded catalog and saved progress.  That makes it a good first command to
+register before the longer run and review flows.
+
+<<register list command>>=
+@application.command("list")
+def list_command(
+    tutorial_path: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--tutorial-path",
+            help=(
+                "Path to a tutorial Markdown file or directory. "
+                "Repeat to add more paths."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """List the loaded tutorials and their saved progress."""
+
+    console = Console()
+    try:
+        tutorial_runner = runner(
+            command_tutorial_paths=tuple(tutorial_path or ()),
+            require_paths=True,
+        )
+    except (RuntimeError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1)
+
+    render_tutorial_list(console, tutorial_runner.list_tutorials())
+@
+
+The run command owns the most interactive path, so it keeps its prompting
+helpers local.  That keeps the surrounding factory readable while still making
+it clear that the command controls how question and editor steps are presented.
+
+<<register run command>>=
+@application.command("run")
+def run_command(
+    tutorial_id: str = typer.Argument(
+        ...,
+        autocompletion=run_tutorial_id_completion,
+    ),
+    tutorial_path: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--tutorial-path",
+            help=(
+                "Path to a tutorial Markdown file or directory. "
+                "Repeat to add more paths."
+            ),
+        ),
+    ] = None,
+    restart: Annotated[
+        bool,
+        typer.Option(
+            "--restart",
+            help="Start a fresh run instead of resuming saved progress.",
+        ),
+    ] = False,
+    allow_shell_checks_flag: Annotated[
+        bool,
+        typer.Option(
+            "--allow-shell-checks",
+            help=(
+                "Trust tutorial-authored shell validation commands for "
+                "this run."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Run or resume one tutorial."""
+
+    console = Console()
+
+    def prompt_for_input(prompt: str) -> str:
+        return typer.prompt(prompt)
+
+    def prompt_for_editor_start(prompt: str) -> str:
+        return typer.prompt(prompt, default="", show_default=False)
+
+    def before_step(tutorial, step_index, step, run) -> None:
+        render_step_prompt(
+            console,
+            tutorial.title,
+            step_index + 1,
+            len(tutorial.steps),
+            step.title,
+            step.instructions,
+            run.workspace,
+            kind=step_kind(step),
+            options=step.options,
+            edit_file=step.edit_file,
+        )
+        if step.edit_file is not None:
+            prompt_to_start_editor(console, prompt_for_editor_start)
+
+    def command_question_runner(*, step):
+        if question_runner is not None:
+            return question_runner(step=step)
+        return run_question_step(
+            step,
+            prompt_for_input=prompt_for_input,
+            console=console,
+        )
+
+    try:
+        tutorial_runner = runner(
+            command_tutorial_paths=tuple(tutorial_path or ()),
+            command_allow_shell_checks=allow_shell_checks_flag,
+            require_paths=True,
+            question_runner_override=command_question_runner,
+        )
+        result = run_tutorial_with_menu(
+            tutorial_runner,
+            tutorial_id,
+            restart=restart,
+            before_step=before_step,
+            console=console,
+            prompt_for_input=prompt_for_input,
+        )
+    except KeyError as error:
+        raise typer.BadParameter(str(error), param_hint="tutorial_id")
+    except (RuntimeError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1)
+
+    if result.blocked_step is not None:
+        raise typer.Exit(code=1)
+
+    emit_run_summary(result)
+@
+
+Review is the third and final command because it reuses the same runner wiring
+without needing the interactive prompting machinery from [[run]].  Ending the
+factory with this command lets the reader contrast the lighter review flow with
+the richer run path immediately above it.
+
+<<register review command>>=
+@application.command("review")
+def review_command(
+    tutorial_id: str = typer.Argument(
+        ...,
+        autocompletion=review_tutorial_id_completion,
+    ),
+    step: Annotated[
+        int | None,
+        typer.Option(
+            "--step",
+            min=1,
+            help="Review only the latest transcript for one step.",
+        ),
+    ] = None,
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Review a specific saved run instead of the latest one.",
+        autocompletion=review_run_id_completion,
+    ),
+) -> None:
+    """Review saved transcripts for one tutorial."""
+
+    console = Console()
+    try:
+        tutorial_runner = runner()
+        tutorial, run, transcripts = tutorial_runner.review(
+            tutorial_id,
+            step_number=step,
+            run_id=run_id,
+        )
+    except (KeyError, IndexError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1)
+
+    render_review_output(
+        console,
+        tutorial.title,
+        run.run_id,
+        run.workspace,
+        transcripts,
+    )
 @
 
 
