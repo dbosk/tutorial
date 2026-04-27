@@ -545,11 +545,17 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
 
 \section{Building one tutorial step}
 
-Once the optional metadata block is separated from the Markdown body, the
-remaining conversion is still mostly a straightforward mapping onto
-[[TutorialStep]].  The interaction schema is still intentionally small:
-shell is the default, [[edit_file]] still selects editor steps, and
-authored questions add [[kind]], [[options]], and [[answers]].
+Once the optional metadata block is separated from the Markdown body, step
+construction still has four distinct concerns.  We first extract the authored
+metadata and student-facing instructions, then derive the interaction shape,
+then reject unsupported combinations, and only after that build the final
+[[TutorialStep]].
+
+That separation matters because the interaction schema is intentionally small:
+shell is the default, [[edit_file]] still selects editor steps, and authored
+questions add [[kind]], [[options]], and [[answers]].  Keeping the phases
+visible makes it easier to see where we interpret that schema and where we
+merely copy validated values into the model.
 
 The recorded-text checks are slightly richer.  Tutorials may still use a
 simple YAML list of strings, but each item can also be a small mapping with
@@ -560,59 +566,90 @@ for regular expressions when a step genuinely needs them.
 def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
     """Build one tutorial step from a parsed Markdown section."""
 
-    metadata, instructions = step_metadata_and_instructions(section_body)
-    reject_unknown_keys(
-        metadata,
-        {
-            "answers",
-            "check_command",
-            "edit_file",
-            "hint",
-            "kind",
-            "options",
-            "required_patterns",
-        },
-        f"Step {title!r}",
-    )
-    if not instructions:
-        raise ValueError(f"Step {title!r} must contain instructions.")
+    <<extract step metadata and instructions>>
+    <<derive the interaction shape>>
+    <<reject invalid step shapes>>
+    <<construct the tutorial step>>
+@
 
-    kind = optional_string(metadata.get("kind"), f"Step {title!r} kind")
-    has_options = "options" in metadata
-    has_answers = "answers" in metadata
-    options = option_tuple(metadata.get("options"), f"Step {title!r} options")
-    answers = step_answers(metadata, title, kind)
-    edit_file = optional_string(
-        metadata.get("edit_file"),
-        f"Step {title!r} edit_file",
-    )
-    validate_step_shape(
-        title,
-        kind=kind,
-        has_options=has_options,
-        has_answers=has_answers,
-        options=options,
-        answers=answers,
-        edit_file=edit_file,
-    )
+The first phase separates student-facing instructions from authored control
+metadata and rejects keys the runtime does not understand.  Doing that work up
+front keeps later phases about meaning rather than about defensive bookkeeping.
 
-    return TutorialStep(
-        title=title,
-        instructions=instructions,
-        kind=kind,
-        options=options,
-        answers=answers,
-        required_patterns=text_match_tuple(
-            metadata.get("required_patterns"),
-            f"Step {title!r} required_patterns",
-        ),
-        check_command=optional_string(
-            metadata.get("check_command"),
-            f"Step {title!r} check_command",
-        ),
-        hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
-        edit_file=edit_file,
-    )
+<<extract step metadata and instructions>>=
+metadata, instructions = step_metadata_and_instructions(section_body)
+reject_unknown_keys(
+    metadata,
+    {
+        "answers",
+        "check_command",
+        "edit_file",
+        "hint",
+        "kind",
+        "options",
+        "required_patterns",
+    },
+    f"Step {title!r}",
+)
+if not instructions:
+    raise ValueError(f"Step {title!r} must contain instructions.")
+@
+
+Next we derive the small interaction schema from the raw metadata.  This keeps
+all interpretation of [[kind]], [[options]], and [[answers]] in one place
+before we ask whether the combination is valid.
+
+<<derive the interaction shape>>=
+kind = optional_string(metadata.get("kind"), f"Step {title!r} kind")
+has_options = "options" in metadata
+has_answers = "answers" in metadata
+options = option_tuple(metadata.get("options"), f"Step {title!r} options")
+answers = step_answers(metadata, title, kind)
+edit_file = optional_string(
+    metadata.get("edit_file"),
+    f"Step {title!r} edit_file",
+)
+@
+
+Shape validation stays separate so the schema rules read as one coherent gate:
+editor steps, shell steps, and authored questions each allow different pieces
+of metadata, and we reject impossible combinations before constructing the
+model object.
+
+<<reject invalid step shapes>>=
+validate_step_shape(
+    title,
+    kind=kind,
+    has_options=has_options,
+    has_answers=has_answers,
+    options=options,
+    answers=answers,
+    edit_file=edit_file,
+)
+@
+
+Once the metadata has passed those checks, construction really is a direct
+mapping into [[TutorialStep]].  Keeping that final phase small makes it clear
+that the earlier chunks already did the interpretive work.
+
+<<construct the tutorial step>>=
+return TutorialStep(
+    title=title,
+    instructions=instructions,
+    kind=kind,
+    options=options,
+    answers=answers,
+    required_patterns=text_match_tuple(
+        metadata.get("required_patterns"),
+        f"Step {title!r} required_patterns",
+    ),
+    check_command=optional_string(
+        metadata.get("check_command"),
+        f"Step {title!r} check_command",
+    ),
+    hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
+    edit_file=edit_file,
+)
 @
 
 Let's verify that a leading metadata block is parsed while ordinary code
