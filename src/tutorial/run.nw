@@ -170,6 +170,10 @@ The test fixture itself is easier to maintain when each step stays readable in
 the literate source.  We therefore keep the Python string wrapper in one place
 and let the chunks contain plain tutorial Markdown.
 
+We start with one stable tutorial identity so every runner test can talk about
+the same tutorial and the same saved-run records.  That keeps the assertions
+focused on runner state transitions rather than on fixture-specific metadata.
+
 <<sample tutorial front matter>>=
 ---
 id: shell-basics
@@ -177,6 +181,11 @@ title: Shell Basics
 summary: Inspect the workspace, create and edit a file, and review what you did.
 ---
 @
+
+The first step is the simplest shell interaction: it only asks for transcript
+patterns.  This gives the runner tests a predictable place to verify blocked
+steps, retry behaviour, and transcript persistence before any file mutation or
+question logic appears.
 
 <<sample workspace inspection step>>=
 # Inspect the workspace
@@ -193,6 +202,10 @@ Run `pwd` and `ls`.
 This shows where the tutorial stores its work for this run.
 @
 
+The second step still uses the shell backend, but it succeeds only when the
+workspace changed in the expected way.  That matters for the runner because it
+must validate both the recorded transcript and the resulting filesystem state.
+
 <<sample note creation step>>=
 # Create a note
 
@@ -207,6 +220,11 @@ One way is:
 
 `touch notes.txt`
 @
+
+The editor-backed step is the first time the runner must switch backends.  It
+exists so the tests can verify that editor results are stored as transcripts and
+that later validation still sees the file contents produced by that separate
+interaction mode.
 
 <<sample note editing step>>=
 # Edit the note
@@ -224,6 +242,11 @@ Open `notes.txt` in your editor and add the word `tutorial`.
 Save the file and quit the editor so the tutorial can continue.
 @
 
+The input question step introduces the question backend with the lightest
+possible answer shape.  Using a regular-expression answer keeps the runner tests
+focused on question dispatch and answer validation rather than on insignificant
+whitespace details.
+
 <<sample input question step>>=
 # Type the command
 
@@ -237,6 +260,10 @@ hint: Type only `pwd`.
 
 Type the command that prints the working directory.
 @
+
+The single-select step adds authored options and one literal correct answer.
+That lets the tests isolate the runner's one-choice validation rule before they
+move on to the more flexible multi-select case.
 
 <<sample single-select step>>=
 # Pick the listing command
@@ -254,6 +281,11 @@ answers:
 Choose the command that lists directory contents.
 @
 
+The multi-select step completes the question coverage by requiring several
+correct answers at once.  The runner treats those answers as a set, so this step
+exists to verify that validation logic separately from transcript-pattern
+matching.
+
 <<sample multi-select step>>=
 # Pick all inspection commands
 
@@ -270,6 +302,11 @@ answers:
 
 Choose every command that inspects the current directory.
 @
+
+The final step returns to the shell and inspects the file edited earlier.  That
+closing step matters because it fuses the previous backends: the runner must
+carry workspace state from shell and editor steps into one last transcript and
+validation pass.
 
 <<sample review step>>=
 # Review the note
@@ -455,70 +492,131 @@ def run(
 ) -> RunResult:
     """Run or resume ``tutorial_id``."""
 
-    tutorial = self.catalog.get_tutorial(tutorial_id)
-    run, restarted, already_finished = self.select_run(tutorial, restart=restart)
-    progress = self.store.progress_for(tutorial, run)
-    if already_finished:
-        return RunResult(
-            tutorial=tutorial,
-            run=run,
-            progress=progress,
-            executed_steps=0,
-            restarted=restarted,
-            already_finished=True,
-        )
+    <<load tutorial and choose run>>
+    <<return immediately when the tutorial is already finished>>
+    <<initialise run loop state>>
+    <<execute remaining tutorial steps>>
+    <<return run result>>
+@
 
-    executed_steps = 0
-    blocked_step = None
-    blocked_transcript = None
-    start_index = count_completed_steps(run)
+Resolving the tutorial and current run is a policy decision: before we can
+talk about step execution, we must know whether we are resuming work or starting
+fresh.
 
-    for step_index in range(start_index, len(tutorial.steps)):
-        step = tutorial.steps[step_index]
-        if before_step is not None:
-            before_step(tutorial, step_index, step, run)
+<<load tutorial and choose run>>=
+tutorial = self.catalog.get_tutorial(tutorial_id)
+run, restarted, already_finished = self.select_run(tutorial, restart=restart)
+progress = self.store.progress_for(tutorial, run)
+@
 
-        step_result = perform_step(
-            step,
-            tutorial_id=tutorial.id,
-            workspace=run.workspace,
-            shell_runner=self.shell_runner,
-            editor_runner=self.editor_runner,
-            question_runner=self.question_runner,
-        )
-        passed = validate_step(
-            step,
-            recorded_text(step_result),
-            run.workspace,
-            allow_shell_checks=self.allow_shell_checks,
-        )
-        transcript = build_step_transcript(
-            tutorial_id=tutorial.id,
-            step_index=step_index,
-            step=step,
-            step_result=step_result,
-            passed=passed,
-        )
-        run.transcripts.append(transcript)
-        run.updated_at = step_result.ended_at
-        self.store.store_run(run)
-        progress = self.store.progress_for(tutorial, run)
-        executed_steps += 1
+If the tutorial is already complete, opening another shell would only repeat a
+finished interaction.  Returning here keeps that distinction explicit.
 
-        if not passed:
-            blocked_step = step
-            blocked_transcript = transcript
-            break
-
+<<return immediately when the tutorial is already finished>>=
+if already_finished:
     return RunResult(
         tutorial=tutorial,
         run=run,
         progress=progress,
-        executed_steps=executed_steps,
+        executed_steps=0,
         restarted=restarted,
-        blocked_step=blocked_step,
-        blocked_transcript=blocked_transcript,
+        already_finished=True,
     )
+@
+
+The remaining state tracks how far the loop progressed and, if validation
+fails, which step blocked further execution.
+
+<<initialise run loop state>>=
+executed_steps = 0
+blocked_step = None
+blocked_transcript = None
+start_index = count_completed_steps(run)
+@
+
+We persist after every step because resuming must survive interruptions between
+interactions.  The loop therefore prepares one attempt, executes the appropriate
+backend, records the result, and stops as soon as one step fails.
+
+<<execute remaining tutorial steps>>=
+for step_index in range(start_index, len(tutorial.steps)):
+    <<prepare one step attempt>>
+    <<run one step backend>>
+    <<validate and persist one step attempt>>
+    <<stop on the first failed step>>
+@
+
+Each iteration first fixes the current step and gives the caller one chance to
+announce it before any backend runs.
+
+<<prepare one step attempt>>=
+step = tutorial.steps[step_index]
+if before_step is not None:
+    before_step(tutorial, step_index, step, run)
+@
+
+This phase is the interaction boundary: one shell, editor, or question session
+produces one recorded result.
+
+<<run one step backend>>=
+step_result = perform_step(
+    step,
+    tutorial_id=tutorial.id,
+    workspace=run.workspace,
+    shell_runner=self.shell_runner,
+    editor_runner=self.editor_runner,
+    question_runner=self.question_runner,
+)
+@
+
+Validation and persistence stay together so the saved run always reflects the
+latest attempt that determined whether execution may continue.
+
+<<validate and persist one step attempt>>=
+passed = validate_step(
+    step,
+    recorded_text(step_result),
+    run.workspace,
+    allow_shell_checks=self.allow_shell_checks,
+)
+transcript = build_step_transcript(
+    tutorial_id=tutorial.id,
+    step_index=step_index,
+    step=step,
+    step_result=step_result,
+    passed=passed,
+)
+run.transcripts.append(transcript)
+run.updated_at = step_result.ended_at
+self.store.store_run(run)
+progress = self.store.progress_for(tutorial, run)
+executed_steps += 1
+@
+
+Once one step fails, later steps would no longer reflect the authored sequence.
+Stopping immediately keeps the saved state aligned with what the student still
+needs to fix.
+
+<<stop on the first failed step>>=
+if not passed:
+    blocked_step = step
+    blocked_transcript = transcript
+    break
+@
+
+The result object summarises the final run state, including whether we resumed,
+how many steps executed, and which step blocked progress.
+
+<<return run result>>=
+return RunResult(
+    tutorial=tutorial,
+    run=run,
+    progress=progress,
+    executed_steps=executed_steps,
+    restarted=restarted,
+    blocked_step=blocked_step,
+    blocked_transcript=blocked_transcript,
+)
 @
 
 Let's verify that a mixed shell-and-editor run can complete the sample

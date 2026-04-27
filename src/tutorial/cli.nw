@@ -42,12 +42,192 @@ from tutorial.cli import *
 from tutorial.model import StepTranscript
 from tutorial.model import Tutorial
 from tutorial.model import TutorialStep
-from tutorial.run import write_demo_tutorial
 from tutorial.shell import EditorResult
 from tutorial.shell import run_scripted_shell
 from tutorial.state import StateStore
 
 <<test functions>>
+@
+
+The CLI tests also need a small authored tutorial, but that fixture belongs on
+the test side rather than in production code.  We keep a local copy here so
+the generated CLI tests stay self-contained even though the runner's own test
+fixture no longer tangles into [[run.py]].
+
+<<test functions>>=
+def write_demo_tutorial(root_dir: str | Path) -> Path:
+    """Write the sample tutorial file used by CLI tests."""
+
+    tutorial_path = Path(root_dir) / "shell-basics.md"
+    tutorial_path.write_text(
+        """\
+<<CLI test tutorial front matter>>
+<<CLI test shell transcript step>>
+<<CLI test file creation step>>
+<<CLI test editor step>>
+<<CLI test input question step>>
+<<CLI test single-select step>>
+<<CLI test multi-select step>>
+<<CLI test review step>>
+"""
+    )
+    return tutorial_path
+@
+
+We start with one small tutorial identity that is stable across every CLI test.
+Keeping the same [[shell-basics]] metadata everywhere means the tests can focus
+on command behaviour rather than on fixture-specific naming.
+
+<<CLI test tutorial front matter>>=
+---
+id: shell-basics
+title: Shell Basics
+summary: Inspect the workspace, create and edit a file, and review what you did.
+---
+@
+
+The first step is a plain shell step with two required transcript patterns.  It
+exists so list, run, retry, and blocked-step tests can all observe the simplest
+shell-path behaviour before any editor or question logic appears.
+
+<<CLI test shell transcript step>>=
+
+# Inspect the workspace
+
+```tutorial-step
+required_patterns:
+  - pwd
+  - ls
+hint: The shell starts in the tutorial workspace.
+```
+
+Run `pwd` and `ls`.
+
+This shows where the tutorial stores its work for this run.
+@
+
+The second step checks a file side effect instead of transcript matching alone.
+That gives the CLI tests one shell step whose success depends on the runner's
+workspace state, which matters for end-to-end command flows.
+
+<<CLI test file creation step>>=
+
+# Create a note
+
+```tutorial-step
+check_command: test -f notes.txt
+hint: Any command sequence is fine if `notes.txt` exists afterwards.
+```
+
+Create an empty `notes.txt`.
+
+One way is:
+
+`touch notes.txt`
+@
+
+The editor-backed step exists to exercise the extra CLI behaviour around
+full-screen editors: the step prompt must mention the edited file, and the CLI
+must pause for confirmation before launching the editor.
+
+<<CLI test editor step>>=
+
+# Edit the note
+
+```tutorial-step
+edit_file: notes.txt
+required_patterns:
+  - tutorial
+check_command: grep -q tutorial notes.txt
+hint: Save the file after adding the word `tutorial`.
+```
+
+Open `notes.txt` in your editor and add the word `tutorial`.
+
+Save the file and quit the editor so the tutorial can continue.
+@
+
+The input question step keeps the authored answer flexible by using a regular
+expression.  That lets the CLI tests verify input-question prompting and answer
+normalisation without coupling them to insignificant trailing whitespace.
+
+<<CLI test input question step>>=
+
+# Type the command
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: ^pwd(?:\\s+)?$
+hint: Type only `pwd`.
+```
+
+Type the command that prints the working directory.
+@
+
+The single-select step is the smallest menu-style question.  It exists so the
+CLI tests can verify numbered choices, option rendering, and literal answer
+recording independently of multi-select ordering.
+
+<<CLI test single-select step>>=
+
+# Pick the listing command
+
+```tutorial-step
+kind: single_select
+options:
+  - pwd
+  - cd
+  - ls
+answers:
+  - ls
+```
+
+Choose the command that lists directory contents.
+@
+
+The multi-select step adds the last question behaviour the CLI must support:
+accept several choices, ignore answer order in the UI, and record the final
+transcript in authored-option order for stable review output.
+
+<<CLI test multi-select step>>=
+
+# Pick all inspection commands
+
+```tutorial-step
+kind: multi_select
+options:
+  - pwd
+  - ls
+  - mkdir
+answers:
+  - pwd
+  - ls
+```
+
+Choose every command that inspects the current directory.
+@
+
+The final review step returns to an ordinary shell command, but it now expects
+the edited file contents to appear in the transcript.  That gives review and
+summary tests one end-of-tutorial step whose output reflects the earlier editor
+work.
+
+<<CLI test review step>>=
+
+# Review the note
+
+```tutorial-step
+required_patterns:
+  - cat notes.txt
+  - tutorial
+check_command: grep -q tutorial notes.txt
+```
+
+Display the file with `cat notes.txt`.
+
+The transcript should show both the command and the file contents.
 @
 
 
@@ -261,6 +441,46 @@ def require_tutorial_paths(
     raise RuntimeError("No tutorial paths configured. Pass --tutorial-path.")
 @
 
+Some commands add temporary tutorial paths, question backends, or validation
+flags, but the rule for turning those into one [[TutorialRunner]] should stay
+the same across Typer and argparse.  The shared helper below makes that
+command-scoped runner wiring explicit in one place, so later front-end
+sections can focus on prompts and exit conventions instead of rebuilding the
+same path logic.
+
+<<functions>>=
+def build_command_runner(
+    *,
+    namespace: str = "tutorial",
+    state_root: str | Path | None = None,
+    configured_tutorial_paths: tuple[str | Path, ...] = (),
+    command_tutorial_paths: tuple[str | Path, ...] = (),
+    shell_runner: Callable[..., object] = run_interactive_shell,
+    editor_runner: Callable[..., object] = run_editor,
+    question_runner: Callable[..., ShellResult] | None = None,
+    allow_shell_checks: bool = False,
+    command_allow_shell_checks: bool = False,
+    require_paths: bool = False,
+) -> TutorialRunner:
+    """Build a runner for one concrete command invocation."""
+
+    tutorial_paths = effective_tutorial_paths(
+        configured_tutorial_paths,
+        command_tutorial_paths,
+    )
+    if require_paths:
+        tutorial_paths = require_tutorial_paths(tutorial_paths)
+    return build_runner(
+        namespace=namespace,
+        state_root=state_root,
+        tutorial_paths=tutorial_paths,
+        shell_runner=shell_runner,
+        editor_runner=editor_runner,
+        question_runner=question_runner,
+        allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
+    )
+@
+
 <<test functions>>=
 def test_effective_tutorial_paths_keeps_configured_and_command_paths():
     combined = effective_tutorial_paths((Path("/tmp/one"),), (Path("/tmp/two"),))
@@ -272,6 +492,20 @@ def test_effective_tutorial_paths_keeps_configured_and_command_paths():
 def test_require_tutorial_paths_rejects_empty_configuration():
     with pytest.raises(RuntimeError, match="tutorial-path"):
         require_tutorial_paths(())
+@
+
+<<test functions>>=
+def test_build_command_runner_combines_configured_and_command_paths(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+
+    runner = build_command_runner(
+        state_root=tmp_path / "state",
+        configured_tutorial_paths=(tutorial_path.parent,),
+        command_tutorial_paths=(tutorial_path,),
+        require_paths=True,
+    )
+
+    assert runner.catalog.get_tutorial("shell-basics").id == "shell-basics"
 @
 
 
@@ -1130,6 +1364,61 @@ def run_question_step(
         console.print("Answer using the listed options.", style="dim")
 @
 
+The run flows differ in how they ask for input, but not in how they present a
+step or how they turn a question step into a [[ShellResult]].  These helpers
+keep that interaction policy shared while leaving each front end free to supply
+its own prompting primitive.  That gives the reader one place to understand the
+interactive contract before contrasting Typer and argparse.
+
+<<functions>>=
+def make_question_step_runner(
+    *,
+    console: Console,
+    prompt_for_input: Callable[[str], str],
+    question_runner: Callable[..., ShellResult] | None = None,
+) -> Callable[..., ShellResult]:
+    """Return the question runner for one command invocation."""
+
+    def command_question_runner(*, step):
+        if question_runner is not None:
+            return question_runner(step=step)
+        return run_question_step(
+            step,
+            prompt_for_input=prompt_for_input,
+            console=console,
+        )
+
+    return command_question_runner
+@
+
+<<functions>>=
+def render_step_for_run(
+    *,
+    console: Console,
+    tutorial,
+    step_index: int,
+    step,
+    run,
+    prompt_for_editor_start: Callable[[str], str],
+) -> None:
+    """Render one step prompt during an interactive run."""
+
+    render_step_prompt(
+        console,
+        tutorial.title,
+        step_index + 1,
+        len(tutorial.steps),
+        step.title,
+        step.instructions,
+        run.workspace,
+        kind=step_kind(step),
+        options=step.options,
+        edit_file=step.edit_file,
+    )
+    if step.edit_file is not None:
+        prompt_to_start_editor(console, prompt_for_editor_start)
+@
+
 <<test functions>>=
 def test_normalise_question_answer_accepts_single_select_numbers():
     step = TutorialStep(
@@ -1947,8 +2236,9 @@ def configured_tutorial_paths() -> tuple[str | Path, ...]:
 
 Every command eventually needs the same runner wiring: combine tutorial paths,
 optionally require at least one path, and thread through the chosen backends.
-One local factory keeps that invariant explicit while still letting each
-command supply its own overrides.
+The local closure adapts the shared [[build_command_runner()]] helper to the
+current app factory so the Typer sections below can talk about command-specific
+behaviour rather than replaying the runner setup.
 
 <<define shared runner factory>>=
 def runner(
@@ -1958,20 +2248,17 @@ def runner(
     require_paths: bool = False,
     question_runner_override: Callable[..., ShellResult] | None = None,
 ) -> TutorialRunner:
-    paths = effective_tutorial_paths(
-        configured_tutorial_paths(),
-        command_tutorial_paths,
-    )
-    if require_paths:
-        paths = require_tutorial_paths(paths)
-    return build_runner(
+    return build_command_runner(
         namespace=namespace,
         state_root=state_root,
-        tutorial_paths=paths,
+        configured_tutorial_paths=configured_tutorial_paths(),
+        command_tutorial_paths=command_tutorial_paths,
         shell_runner=shell_runner,
         editor_runner=editor_runner,
         question_runner=question_runner_override or question_runner,
-        allow_shell_checks=allow_shell_checks or command_allow_shell_checks,
+        allow_shell_checks=allow_shell_checks,
+        command_allow_shell_checks=command_allow_shell_checks,
+        require_paths=require_paths,
     )
 @
 
@@ -2042,9 +2329,11 @@ def list_command(
     render_tutorial_list(console, tutorial_runner.list_tutorials())
 @
 
-The run command owns the most interactive path, so it keeps its prompting
-helpers local.  That keeps the surrounding factory readable while still making
-it clear that the command controls how question and editor steps are presented.
+The run command owns the most interactive path, so it only keeps the actual
+prompt primitives local.  Step presentation and question-step dispatch now come
+from shared helpers, which makes the contrast with argparse honest: the two
+front ends differ in prompting surface and exit handling, not in tutorial-flow
+policy.
 
 <<register run command>>=
 @application.command("run")
@@ -2092,29 +2381,20 @@ def run_command(
         return typer.prompt(prompt, default="", show_default=False)
 
     def before_step(tutorial, step_index, step, run) -> None:
-        render_step_prompt(
-            console,
-            tutorial.title,
-            step_index + 1,
-            len(tutorial.steps),
-            step.title,
-            step.instructions,
-            run.workspace,
-            kind=step_kind(step),
-            options=step.options,
-            edit_file=step.edit_file,
-        )
-        if step.edit_file is not None:
-            prompt_to_start_editor(console, prompt_for_editor_start)
-
-    def command_question_runner(*, step):
-        if question_runner is not None:
-            return question_runner(step=step)
-        return run_question_step(
-            step,
-            prompt_for_input=prompt_for_input,
+        render_step_for_run(
             console=console,
+            tutorial=tutorial,
+            step_index=step_index,
+            step=step,
+            run=run,
+            prompt_for_editor_start=prompt_for_editor_start,
         )
+
+    command_question_runner = make_question_step_runner(
+        console=console,
+        prompt_for_input=prompt_for_input,
+        question_runner=question_runner,
+    )
 
     try:
         tutorial_runner = runner(
@@ -2811,9 +3091,10 @@ def run_argparse_command(args: argparse.Namespace) -> int:
 
 \section{Implementing the argparse leaf commands}
 
-Each leaf command delegates to the same runner layer as Typer.  The only
-difference is that argparse commands return integer exit codes instead of
-raising [[typer.Exit]].
+Each leaf command delegates to the same shared command helpers as Typer.
+Argparse still differs in two visible ways: it obtains input through
+[[input()]]-style prompts, and it returns integer exit codes instead of raising
+[[typer.Exit]].  The tutorial-flow policy itself stays shared.
 
 <<functions>>=
 def argparse_list_command(
@@ -2828,17 +3109,14 @@ def argparse_list_command(
     """Implement the argparse ``list`` subcommand."""
 
     try:
-        runner = build_runner(
+        runner = build_command_runner(
             namespace=namespace,
             state_root=state_root,
-            tutorial_paths=require_tutorial_paths(
-                effective_tutorial_paths(
-                    tutorial_paths,
-                    tuple(args.tutorial_path),
-                )
-            ),
+            configured_tutorial_paths=tutorial_paths,
+            command_tutorial_paths=tuple(args.tutorial_path),
             shell_runner=shell_runner,
             editor_runner=editor_runner,
+            require_paths=True,
         )
     except (RuntimeError, ValueError) as error:
         print(error)
@@ -2860,10 +3138,10 @@ def argparse_review_command(
 ) -> int:
     """Implement the argparse ``review`` subcommand."""
 
-    runner = build_runner(
+    runner = build_command_runner(
         namespace=namespace,
         state_root=state_root,
-        tutorial_paths=tutorial_paths,
+        configured_tutorial_paths=tutorial_paths,
         shell_runner=shell_runner,
         editor_runner=editor_runner,
     )
@@ -2947,45 +3225,34 @@ def argparse_run_command(
         def prompt_for_input(prompt: str) -> str:
             return input(f"{prompt}: ")
 
-        def command_question_runner(*, step):
-            if question_runner is not None:
-                return question_runner(step=step)
-            return run_question_step(
-                step,
-                prompt_for_input=prompt_for_input,
-                console=console,
-            )
+        command_question_runner = make_question_step_runner(
+            console=console,
+            prompt_for_input=prompt_for_input,
+            question_runner=question_runner,
+        )
 
-        tutorial_runner = build_runner(
+        tutorial_runner = build_command_runner(
             namespace=namespace,
             state_root=state_root,
-            tutorial_paths=require_tutorial_paths(
-                effective_tutorial_paths(
-                    tutorial_paths,
-                    tuple(args.tutorial_path),
-                )
-            ),
+            configured_tutorial_paths=tutorial_paths,
+            command_tutorial_paths=tuple(args.tutorial_path),
             shell_runner=shell_runner,
             editor_runner=editor_runner,
             question_runner=command_question_runner,
-            allow_shell_checks=allow_shell_checks or args.allow_shell_checks,
+            allow_shell_checks=allow_shell_checks,
+            command_allow_shell_checks=args.allow_shell_checks,
+            require_paths=True,
         )
 
         def before_step(tutorial, step_index, step, run) -> None:
-            render_step_prompt(
-                console,
-                tutorial.title,
-                step_index + 1,
-                len(tutorial.steps),
-                step.title,
-                step.instructions,
-                run.workspace,
-                kind=step_kind(step),
-                options=step.options,
-                edit_file=step.edit_file,
+            render_step_for_run(
+                console=console,
+                tutorial=tutorial,
+                step_index=step_index,
+                step=step,
+                run=run,
+                prompt_for_editor_start=prompt_for_input,
             )
-            if step.edit_file is not None:
-                prompt_to_start_editor(console, prompt_for_input)
 
         result = run_tutorial_with_menu(
             tutorial_runner,
