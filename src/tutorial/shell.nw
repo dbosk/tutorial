@@ -9,6 +9,12 @@ We therefore use a PTY-backed bash shell.  The PTY gives us two things a
 plain subprocess does not: an interactive shell prompt and a transcript
 that reflects what actually appeared in the terminal.
 
+This chapter has two closely related stories.  First we cover editor
+sessions, which are the simpler terminal case: they still need the user's
+TTY, but they do not need PTY relay or transcript capture.  Then we return
+to the main PTY-backed shell path, where controlling-terminal setup and
+byte-for-byte transcript capture become the central concerns.
+
 
 \section{Code overview}
 
@@ -44,6 +50,11 @@ behaviour itself rather than on a higher-level UI framework.
 We also keep editor launching in the same module because it has the same
 terminal constraint as the interactive shell path: the child process must
 talk directly to the user's TTY rather than to a captured pipe.
+
+That shared constraint makes the editor path a useful contrast before we
+build the heavier PTY machinery.  The editor case shows what direct TTY
+ownership looks like when we do 
+not need to capture an interactive transcript.
 
 <<imports>>=
 from __future__ import annotations
@@ -316,6 +327,11 @@ to manage the terminal when connected to the inherited TTY, and we do not
 need to capture every keystroke.  We therefore launch the editor as a
 foreground subprocess, wait for it to exit, and then read the file.
 
+This is the simpler of the two interaction paths in the module.  Once we
+have seen the direct-TTY case, the remaining sections can focus on what the
+shell path adds beyond it: claiming a PTY as the controlling terminal,
+relaying bytes, and preserving a faithful transcript.
+
 <<functions>>=
 def run_editor(
     *,
@@ -326,32 +342,61 @@ def run_editor(
 ) -> EditorResult:
     """Open the configured editor for one file in ``workspace``."""
 
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise RuntimeError("Interactive editor steps require a TTY.")
+    <<require a real TTY for the editor>>
+    <<record editor session start and resolve dependencies>>
+    <<launch the editor on the prepared file>>
+    <<read back the edited file and return the result>>
+@
 
-    started_at = utc_now()
-    environment = build_shell_environment(env)
-    command = resolve_editor_command(environment)
-    file_path = prepare_editor_file(
-        workspace=workspace,
-        relative_path=relative_path,
-        initial_text=initial_text,
-    )
-    completed = subprocess.run(
-        [*command, str(file_path)],
-        cwd=Path(workspace),
-        env=environment,
-    )
-    ended_at = utc_now()
-    text = file_path.read_text() if file_path.exists() else ""
+We reject missing TTYs before doing any file or process setup because the
+editor path only makes sense when a real interactive terminal is available.
 
-    return EditorResult(
-        started_at=started_at,
-        ended_at=ended_at,
-        exit_status=completed.returncode,
-        file_path=str(file_path),
-        text=text,
-    )
+<<require a real TTY for the editor>>=
+if not sys.stdin.isatty() or not sys.stdout.isatty():
+    raise RuntimeError("Interactive editor steps require a TTY.")
+@
+
+The next phase gathers every dependency that the launch step needs.  That
+keeps configuration and file preparation visible before we trigger the
+side effect of opening the editor.
+
+<<record editor session start and resolve dependencies>>=
+started_at = utc_now()
+environment = build_shell_environment(env)
+command = resolve_editor_command(environment)
+file_path = prepare_editor_file(
+    workspace=workspace,
+    relative_path=relative_path,
+    initial_text=initial_text,
+)
+@
+
+The launch itself is intentionally small: once the file and command are
+ready, we simply hand the user's terminal to the editor.
+
+<<launch the editor on the prepared file>>=
+completed = subprocess.run(
+    [*command, str(file_path)],
+    cwd=Path(workspace),
+    env=environment,
+)
+@
+
+All session runners in this module end by assembling a compact result
+record.  Keeping that as its own phase makes the shared shape easier to
+see across editor, scripted shell, and interactive shell paths.
+
+<<read back the edited file and return the result>>=
+ended_at = utc_now()
+text = file_path.read_text() if file_path.exists() else ""
+
+return EditorResult(
+    started_at=started_at,
+    ended_at=ended_at,
+    exit_status=completed.returncode,
+    file_path=str(file_path),
+    text=text,
+)
 @
 
 The real editor path needs a TTY, so unit tests inject a harmless command
@@ -389,6 +434,10 @@ Attaching bash to the slave side of a PTY is not quite enough for a real
 interactive shell.  Bash also expects that terminal to be its controlling
 terminal, otherwise it disables job control and prints warnings before the
 prompt appears.
+
+This is where the chapter returns to its main PTY story.  The editor path
+needed only direct access to the user's TTY; the shell path must also make
+the PTY behave like a real login terminal for bash.
 
 Python 3.10 does not yet offer [[os.login_tty()]], so the smallest fix is
 to do the setup just before [[exec]] in the child process.  We start a new
@@ -538,29 +587,51 @@ def run_scripted_shell(
 ) -> ShellResult:
     """Run ``commands`` in a PTY-backed shell and capture the transcript."""
 
-    started_at = utc_now()
-    master_fd, process = spawn_shell_process(
-        workspace=workspace,
-        shell=shell,
-        prompt_name=prompt_name,
-        env=env,
-    )
+    <<record scripted session start and spawn the shell>>
+    <<normalise scripted commands and request exit>>
+    <<drain the transcript and return the result>>
+@
 
-    command_text = commands
-    if not command_text.endswith("\n"):
-        command_text += "\n"
-    os.write(master_fd, (command_text + "exit\n").encode("utf-8"))
-    transcript = read_transcript(master_fd, process)
-    os.close(master_fd)
-    exit_status = process.wait()
-    ended_at = utc_now()
+The scripted path still uses the real PTY shell setup so tests exercise the
+same bash configuration as interactive runs.  We separate that setup from
+the command injection so the shared PTY policy stays visible.
 
-    return ShellResult(
-        started_at=started_at,
-        ended_at=ended_at,
-        exit_status=exit_status,
-        transcript=transcript,
-    )
+<<record scripted session start and spawn the shell>>=
+started_at = utc_now()
+master_fd, process = spawn_shell_process(
+    workspace=workspace,
+    shell=shell,
+    prompt_name=prompt_name,
+    env=env,
+)
+@
+
+Tests should not have to remember a trailing newline or explicit [[exit]].
+We normalise the authored command text once, then ask the shell to exit so
+the transcript has a clear end.
+
+<<normalise scripted commands and request exit>>=
+command_text = commands
+if not command_text.endswith("\n"):
+    command_text += "\n"
+os.write(master_fd, (command_text + "exit\n").encode("utf-8"))
+@
+
+Again the final phase is result assembly: drain everything the PTY printed,
+wait for bash to finish, and package the session into one [[ShellResult]].
+
+<<drain the transcript and return the result>>=
+transcript = read_transcript(master_fd, process)
+os.close(master_fd)
+exit_status = process.wait()
+ended_at = utc_now()
+
+return ShellResult(
+    started_at=started_at,
+    ended_at=ended_at,
+    exit_status=exit_status,
+    transcript=transcript,
+)
 @
 
 Let's verify that scripted sessions both execute commands and write files
@@ -697,39 +768,73 @@ def run_interactive_shell(
 ) -> ShellResult:
     """Open an interactive PTY-backed shell in ``workspace``."""
 
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise RuntimeError("Interactive tutorial shells require a TTY.")
+    <<require a real TTY for the interactive shell>>
+    <<record interactive session start and spawn the shell>>
+    <<capture terminal state for relay>>
+    <<relay the interactive session in raw mode>>
+    <<restore the terminal and return the result>>
+@
 
-    started_at = utc_now()
-    master_fd, process = spawn_shell_process(
-        workspace=workspace,
-        shell=shell,
-        prompt_name=prompt_name,
-        env=env,
+The interactive shell makes even stronger assumptions about the terminal
+than the editor path does: both stdin and stdout must already be attached
+to a real TTY before we can start PTY relay.
+
+<<require a real TTY for the interactive shell>>=
+if not sys.stdin.isatty() or not sys.stdout.isatty():
+    raise RuntimeError("Interactive tutorial shells require a TTY.")
+@
+
+As in the scripted path, we keep PTY-shell startup as a distinct phase so
+the relay code can assume the shell is already running.
+
+<<record interactive session start and spawn the shell>>=
+started_at = utc_now()
+master_fd, process = spawn_shell_process(
+    workspace=workspace,
+    shell=shell,
+    prompt_name=prompt_name,
+    env=env,
+)
+@
+
+Before we forward bytes, we snapshot the current terminal state.  That
+gives the relay phase freedom to switch into raw mode while still making
+restoration explicit and reliable.
+
+<<capture terminal state for relay>>=
+stdin_fd = sys.stdin.fileno()
+stdout_fd = sys.stdout.fileno()
+original_mode = termios.tcgetattr(stdin_fd)
+@
+
+The relay phase is where the session temporarily behaves like a normal
+interactive shell: raw mode lets control characters and line editing pass
+through unchanged while the helper forwards bytes in both directions.
+
+<<relay the interactive session in raw mode>>=
+try:
+    tty.setraw(stdin_fd)
+    transcript = relay_interactive_shell(
+        master_fd,
+        process,
+        stdin_fd,
+        stdout_fd,
     )
+finally:
+    termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
+@
 
-    stdin_fd = sys.stdin.fileno()
-    stdout_fd = sys.stdout.fileno()
-    original_mode = termios.tcgetattr(stdin_fd)
+Once the relay ends, we close the PTY, wait for bash, and package the same
+kind of session summary returned by the other shell helpers.
 
-    try:
-        tty.setraw(stdin_fd)
-        transcript = relay_interactive_shell(
-            master_fd,
-            process,
-            stdin_fd,
-            stdout_fd,
-        )
-    finally:
-        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
-
-    os.close(master_fd)
-    exit_status = process.wait()
-    ended_at = utc_now()
-    return ShellResult(
-        started_at=started_at,
-        ended_at=ended_at,
-        exit_status=exit_status,
-        transcript=transcript,
-    )
+<<restore the terminal and return the result>>=
+os.close(master_fd)
+exit_status = process.wait()
+ended_at = utc_now()
+return ShellResult(
+    started_at=started_at,
+    ended_at=ended_at,
+    exit_status=exit_status,
+    transcript=transcript,
+)
 @
