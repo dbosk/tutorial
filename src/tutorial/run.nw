@@ -142,6 +142,150 @@ def test_run_result_can_report_blocked_step():
     assert result.blocked_step.title == "Inspect the workspace"
 @
 
+Many runner tests need the same authored tutorial so they can focus on
+runner behaviour rather than fixture setup.  We keep one shared writer on
+the test side so the production module only tells the runtime story.
+
+<<test functions>>=
+def write_demo_tutorial(root_dir: str | Path) -> Path:
+    """Write the sample tutorial file used by runner tests."""
+
+    tutorial_path = Path(root_dir) / "shell-basics.md"
+    tutorial_path.write_text(
+        """\
+<<sample tutorial front matter>>
+<<sample workspace inspection step>>
+<<sample note creation step>>
+<<sample note editing step>>
+<<sample input question step>>
+<<sample single-select step>>
+<<sample multi-select step>>
+<<sample review step>>
+"""
+    )
+    return tutorial_path
+@
+
+The test fixture itself is easier to maintain when each step stays readable in
+the literate source.  We therefore keep the Python string wrapper in one place
+and let the chunks contain plain tutorial Markdown.
+
+<<sample tutorial front matter>>=
+---
+id: shell-basics
+title: Shell Basics
+summary: Inspect the workspace, create and edit a file, and review what you did.
+---
+@
+
+<<sample workspace inspection step>>=
+# Inspect the workspace
+
+```tutorial-step
+required_patterns:
+  - pwd
+  - ls
+hint: The shell starts in the tutorial workspace.
+```
+
+Run `pwd` and `ls`.
+
+This shows where the tutorial stores its work for this run.
+@
+
+<<sample note creation step>>=
+# Create a note
+
+```tutorial-step
+check_command: test -f notes.txt
+hint: Any command sequence is fine if `notes.txt` exists afterwards.
+```
+
+Create an empty `notes.txt`.
+
+One way is:
+
+`touch notes.txt`
+@
+
+<<sample note editing step>>=
+# Edit the note
+
+```tutorial-step
+edit_file: notes.txt
+required_patterns:
+  - tutorial
+check_command: grep -q tutorial notes.txt
+hint: Save the file after adding the word `tutorial`.
+```
+
+Open `notes.txt` in your editor and add the word `tutorial`.
+
+Save the file and quit the editor so the tutorial can continue.
+@
+
+<<sample input question step>>=
+# Type the command
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: ^pwd(?:\\s+)?$
+hint: Type only `pwd`.
+```
+
+Type the command that prints the working directory.
+@
+
+<<sample single-select step>>=
+# Pick the listing command
+
+```tutorial-step
+kind: single_select
+options:
+  - pwd
+  - cd
+  - ls
+answers:
+  - ls
+```
+
+Choose the command that lists directory contents.
+@
+
+<<sample multi-select step>>=
+# Pick all inspection commands
+
+```tutorial-step
+kind: multi_select
+options:
+  - pwd
+  - ls
+  - mkdir
+answers:
+  - pwd
+  - ls
+```
+
+Choose every command that inspects the current directory.
+@
+
+<<sample review step>>=
+# Review the note
+
+```tutorial-step
+required_patterns:
+  - cat notes.txt
+  - tutorial
+check_command: grep -q tutorial notes.txt
+```
+
+Display the file with `cat notes.txt`.
+
+The transcript should show both the command and the file contents.
+@
+
 
 \section{The tutorial runner}
 
@@ -1455,94 +1599,4 @@ def ensure_run_matches_tutorial(tutorial: Tutorial, run: TutorialRun) -> None:
             f"Tutorial {tutorial.id!r} changed since this run began. "
             "Use --restart to begin a fresh run."
         )
-@
-
-
-\section{Writing a sample tutorial file for tests}
-
-Many runner tests need the same small Markdown tutorial file.  A helper
-keeps that fixture stable and makes the catalog-based tests easier to
-read.
-
-<<functions>>=
-def write_demo_tutorial(root_dir: str | Path) -> Path:
-    """Write the sample tutorial file used by runner tests."""
-
-    tutorial_path = Path(root_dir) / "shell-basics.md"
-    tutorial_path.write_text(
-        "---\n"
-        "id: shell-basics\n"
-        "title: Shell Basics\n"
-        "summary: Inspect the workspace, create and edit a file, and review what you did.\n"
-        "---\n\n"
-        "# Inspect the workspace\n\n"
-        "```tutorial-step\n"
-        "required_patterns:\n"
-        "  - pwd\n"
-        "  - ls\n"
-        "hint: The shell starts in the tutorial workspace.\n"
-        "```\n\n"
-        "Run `pwd` and `ls`.\n\n"
-        "This shows where the tutorial stores its work for this run.\n\n"
-        "# Create a note\n\n"
-        "```tutorial-step\n"
-        "check_command: test -f notes.txt\n"
-        "hint: Any command sequence is fine if `notes.txt` exists afterwards.\n"
-        "```\n\n"
-        "Create an empty `notes.txt`.\n\n"
-        "One way is:\n\n"
-        "`touch notes.txt`\n\n"
-        "# Edit the note\n\n"
-        "```tutorial-step\n"
-        "edit_file: notes.txt\n"
-        "required_patterns:\n"
-        "  - tutorial\n"
-        "check_command: grep -q tutorial notes.txt\n"
-        "hint: Save the file after adding the word `tutorial`.\n"
-        "```\n\n"
-        "Open `notes.txt` in your editor and add the word `tutorial`.\n\n"
-        "Save the file and quit the editor so the tutorial can continue.\n\n"
-        "# Type the command\n\n"
-        "```tutorial-step\n"
-        "kind: input\n"
-        "answers:\n"
-        "  - mode: regex\n"
-        "    pattern: ^pwd(?:\\\\s+)?$\n"
-        "hint: Type only `pwd`.\n"
-        "```\n\n"
-        "Type the command that prints the working directory.\n\n"
-        "# Pick the listing command\n\n"
-        "```tutorial-step\n"
-        "kind: single_select\n"
-        "options:\n"
-        "  - pwd\n"
-        "  - cd\n"
-        "  - ls\n"
-        "answers:\n"
-        "  - ls\n"
-        "```\n\n"
-        "Choose the command that lists directory contents.\n\n"
-        "# Pick all inspection commands\n\n"
-        "```tutorial-step\n"
-        "kind: multi_select\n"
-        "options:\n"
-        "  - pwd\n"
-        "  - ls\n"
-        "  - mkdir\n"
-        "answers:\n"
-        "  - pwd\n"
-        "  - ls\n"
-        "```\n\n"
-        "Choose every command that inspects the current directory.\n\n"
-        "# Review the note\n\n"
-        "```tutorial-step\n"
-        "required_patterns:\n"
-        "  - cat notes.txt\n"
-        "  - tutorial\n"
-        "check_command: grep -q tutorial notes.txt\n"
-        "```\n\n"
-        "Display the file with `cat notes.txt`.\n\n"
-        "The transcript should show both the command and the file contents.\n"
-    )
-    return tutorial_path
 @
