@@ -246,14 +246,12 @@ def test_resolve_editor_command_falls_back_to_first_available_editor(monkeypatch
 
 \section{Preparing one editable file}
 
-Editor-backed steps need a concrete file path before the editor opens.
-Creating parent directories here keeps the launch path small, and only
-writing initial contents when the file does not yet exist avoids clobbering
-work during retries or resumed runs.
+Before we create anything for an editor step, we enforce the module's
+most important file-safety invariant: tutorials may choose a path inside
+the workspace, but they must not redirect the editor to an unrelated
+absolute path or to a parent directory outside the workspace.
 
-We also require the configured path to stay inside the workspace.  A
-tutorial may choose the file name, but it should not silently send the
-student's editor to an unrelated absolute path.
+\subsection{Keeping editor paths inside the workspace}
 
 <<functions>>=
 def workspace_relative_path(relative_path: str) -> Path:
@@ -266,6 +264,12 @@ def workspace_relative_path(relative_path: str) -> Path:
         )
     return path
 @
+
+Once the path is known to be safe, the remaining work is mechanical:
+create any missing parent directories and seed the file only on first use.
+That keeps resumed runs from overwriting work the student already did.
+
+\subsection{Creating or reusing the editable file}
 
 <<functions>>=
 def prepare_editor_file(

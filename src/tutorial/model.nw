@@ -50,17 +50,12 @@ Each step needs enough information for two different readers.
 The student needs a title and instructions, while the runner needs a
 small, explicit check that tells it whether the student can move on.
 
-The step also needs one small interaction choice.  Most steps still open
-an interactive shell, but some tasks are clearer in an editor or are best
-asked directly as authored questions.  We keep that interaction model
-explicit but small: shell remains the default, editor steps still carry
-an optional file path, and question steps add a kind plus a small answer
-schema.
-
 The student-facing prose is still stored as plain strings, but we author
 those strings as Markdown.  That gives the CLI room to render short
 paragraphs and inline commands without inventing a larger tutorial markup
 format in the first release.
+
+\subsection{Checking the recorded result}
 
 We support two complementary checks:
 \begin{description}
@@ -96,6 +91,27 @@ class TextMatch:
     mode: str = "contains"
 @
 
+\subsection{Choosing how the student interacts}
+
+The step also needs one small interaction choice.  Most steps still open
+an interactive shell, but some tasks are clearer in an editor or are best
+asked directly as authored questions.
+
+We keep that interaction model explicit but small.  Shell stays the common
+case, editor steps still carry an optional file path, and question steps
+add only the fields needed to present and validate authored answers.
+
+Question answers reuse the same small matching language as recorded-text
+checks.  That lets authored input questions stay simple when a literal
+string is enough, while still leaving room for a regular-expression escape
+hatch when insignificant whitespace or casing should not matter.
+
+\subsection{Collecting one step definition}
+
+The dataclass itself fuses those earlier decisions back together.  It keeps
+the student-facing text, validation rules, and interaction-specific fields
+in one small record that the loader, runner, and CLI can all share.
+
 <<classes>>=
 @dataclass(frozen=True)
 class TutorialStep:
@@ -111,6 +127,8 @@ class TutorialStep:
     hint: str | None = None
     edit_file: str | None = None
 @
+
+\subsection{Resolving the effective interaction kind}
 
 Shell remains the implicit default so existing step definitions and test
 fixtures stay valid.  Editor steps can still be recognised from
