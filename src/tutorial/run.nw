@@ -1559,13 +1559,26 @@ transcripts contain noise that students do not control: carriage returns,
 ANSI control sequences, and small whitespace differences from completion or
 line editing.  Some shells also record readline redraws literally, so one
 accepted command may appear as text, a backspace, and the replacement
-characters that followed it.  We therefore normalise those details before
-checking plain string patterns.  Tutorials that truly need more control can
-opt into an explicit regular expression.
+characters that followed it.  Tab completion can also leave behind bell
+characters or similar control bytes that the student never intended as part
+of the command.  We therefore normalise those details before checking plain
+string patterns.  Tutorials that truly need more control can opt into an
+explicit regular expression.
 
 <<constants>>=
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 WHITESPACE_RE = re.compile(r"\s+")
+@
+
+<<functions>>=
+def strip_terminal_controls(text: str) -> str:
+    """Return ``text`` without leftover non-printing terminal controls."""
+
+    return "".join(
+        character
+        for character in text
+        if character in {"\n", "\r", "\t"} or ord(character) >= 0x20
+    )
 @
 
 <<functions>>=
@@ -1585,7 +1598,9 @@ def apply_line_editing(text: str) -> str:
 Readline redraw sequences matter here because a recorded backspace is not
 student-visible output; it only means the terminal overwrote the previous
 character.  Applying those edits after stripping ANSI sequences recovers the
-command the student actually left on screen.
+command the student actually left on screen.  We then drop any remaining
+control characters such as the bell byte from failed or partial tab
+completion, because those are terminal feedback rather than authored input.
 
 <<functions>>=
 def normalise_recorded_text(text: str) -> str:
@@ -1593,6 +1608,7 @@ def normalise_recorded_text(text: str) -> str:
 
     text = ANSI_ESCAPE_RE.sub("", text)
     text = apply_line_editing(text)
+    text = strip_terminal_controls(text)
     text = text.replace("\r", "\n")
     return text
 @
@@ -1669,6 +1685,18 @@ def test_transcript_matches_patterns_ignores_line_redraw_backspaces():
             TextMatch("mkdir my-tutorials"),
             TextMatch("ls"),
             TextMatch("my-tutorials"),
+        ),
+    ) is True
+
+
+def test_transcript_matches_patterns_ignores_tab_completion_bell():
+    assert transcript_matches_patterns(
+        "\x1b[?2004hwriting-tutorials $ tutorial li\x07-\b\x1b[Kst --tutori"
+        "\x07al-path my-tutorials\r\n"
+        "\x1b[?2004l\r\x1b[1mgreeting         \x1b[0m 0/1 complete\r\n",
+        (
+            TextMatch("tutorial list --tutorial-path my-tutorials"),
+            TextMatch("greeting"),
         ),
     ) is True
 
