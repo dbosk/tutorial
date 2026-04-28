@@ -19,6 +19,8 @@ layer and only varies the argument plumbing.
 
 <<imports>>
 
+<<constants>>
+
 <<functions>>
 
 app = create_standalone_app()
@@ -40,6 +42,7 @@ from typer.testing import CliRunner
 
 from tutorial.cli import *
 from tutorial.model import StepTranscript
+from tutorial.model import TextMatch
 from tutorial.model import Tutorial
 from tutorial.model import TutorialStep
 from tutorial.shell import EditorResult
@@ -243,8 +246,11 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import re
+import tempfile
 from typing import Annotated
 from typing import Callable
+from typing import Optional
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -252,7 +258,9 @@ import urllib.request
 import platformdirs
 from tutorial.catalog import TutorialCatalog
 from tutorial.catalog import builtin_tutorial_paths
+from tutorial.catalog import parse_tutorial_step_markdown
 from tutorial.catalog import parse_tutorial_text
+from tutorial.catalog import serialize_tutorial_step
 from tutorial.catalog import universal_tutorial_path
 from rich.console import Console
 from rich.markdown import Markdown
@@ -260,8 +268,13 @@ from rich.table import Table
 import typer
 
 from tutorial.model import step_kind
+from tutorial.model import TutorialStep
+from tutorial.run import perform_step
+from tutorial.run import recorded_text
 from tutorial.run import RunResult
 from tutorial.run import TutorialRunner
+from tutorial.run import validate_step
+from tutorial.shell import EditorResult
 from tutorial.shell import run_editor
 from tutorial.shell import run_interactive_shell
 from tutorial.shell import ShellResult
@@ -2524,6 +2537,8 @@ def create_standalone_app(
 
         typer.echo(f"Installed {tutorial_id} at {target_path}")
 
+    <<register develop command>>
+
     return application
 @
 
@@ -3341,4 +3356,760 @@ def test_argparse_run_command_handles_question_steps(
     assert "Choose one option" in captured.out
     assert "Choose all that apply" in captured.out
     assert "Completed shell-basics" in captured.out
+@
+
+
+\section{Develop: an authoring loop for one step}
+
+The [[develop]] command is the only command that exists purely to support
+authoring tutorials.  Its job is to let the author iterate on a single step
+in a fresh workspace, see whether the runner agrees with their intent, and
+fix the step source whenever the verdict is wrong.
+
+It deliberately bypasses the persistence layer.  Saved runs and resume
+state would only get in the way: the author is changing the step itself,
+so each iteration is a clean slate.  The loop reuses
+[[perform_step]], [[recorded_text]], and [[validate_step]] so the verdict
+develop reports is the verdict [[run]] would give end users.
+
+\subsection{Resolving an existing step}
+
+The author identifies a step by either its 1-indexed number or a
+case-insensitive regex matched against [[step.title]].  We try the number
+first and fall back to the regex so the more specific form wins when both
+forms could apply.
+
+<<functions>>=
+def parse_step_locator(
+    locator: str,
+    steps: tuple[TutorialStep, ...],
+) -> TutorialStep:
+    """Resolve ``locator`` to one [[TutorialStep]] by number or title regex."""
+
+    locator = locator.strip()
+    if not locator:
+        raise ValueError("Step locator must not be empty.")
+
+    try:
+        index = int(locator) - 1
+    except ValueError:
+        index = None
+
+    if index is not None:
+        if not 0 <= index < len(steps):
+            raise ValueError(
+                f"Step number {locator} is out of range "
+                f"(tutorial has {len(steps)} step(s))."
+            )
+        return steps[index]
+
+    try:
+        pattern = re.compile(locator, re.IGNORECASE)
+    except re.error as error:
+        raise ValueError(
+            f"Step locator {locator!r} is neither a number nor a valid regex: {error}."
+        )
+
+    matches = [step for step in steps if pattern.search(step.title)]
+    if not matches:
+        raise ValueError(f"No step title matches regex {locator!r}.")
+    if len(matches) > 1:
+        titles = ", ".join(repr(step.title) for step in matches)
+        raise ValueError(
+            f"Step regex {locator!r} matches more than one step: {titles}."
+        )
+    return matches[0]
+@
+
+<<test functions>>=
+def test_parse_step_locator_resolves_by_number():
+    steps = (
+        TutorialStep(title="One", instructions="First."),
+        TutorialStep(title="Two", instructions="Second."),
+    )
+
+    assert parse_step_locator("2", steps) is steps[1]
+
+
+def test_parse_step_locator_resolves_by_regex():
+    steps = (
+        TutorialStep(title="Edit notes", instructions="First."),
+        TutorialStep(title="Run shell", instructions="Second."),
+    )
+
+    assert parse_step_locator("^Run", steps) is steps[1]
+
+
+def test_parse_step_locator_rejects_ambiguous_regex():
+    steps = (
+        TutorialStep(title="Edit notes", instructions="First."),
+        TutorialStep(title="Edit list", instructions="Second."),
+    )
+
+    with pytest.raises(ValueError):
+        parse_step_locator("^Edit", steps)
+
+
+def test_parse_step_locator_rejects_out_of_range_number():
+    steps = (TutorialStep(title="One", instructions="First."),)
+
+    with pytest.raises(ValueError):
+        parse_step_locator("5", steps)
+@
+
+
+\subsection{Pre-filling the editor for a new step or a re-edit}
+
+New-step mode opens the editor on a starter template that already parses,
+so the author can save without first reaching for the [[tutorial-step]]
+syntax.  The re-edit mode appends the most recent run to the same file
+behind a sentinel line: the author edits the step source above the
+sentinel, and the loop strips everything from the sentinel onwards before
+re-parsing.
+
+We use a plain-text sentinel rather than an HTML comment because tutorial
+step bodies are Markdown, so an HTML comment that happens to contain
+[[-->]] would close early and surprise the author.
+
+<<constants>>=
+DEVELOP_NEW_STEP_TEMPLATE = (
+    "# New step\n"
+    "\n"
+    "```tutorial-step\n"
+    "required_patterns:\n"
+    "  - example-command\n"
+    "hint: Try running example-command.\n"
+    "```\n"
+    "\n"
+    "Replace this paragraph with the step instructions.\n"
+)
+DEVELOP_RUN_MARKER = (
+    "<!-- ====== LAST RUN — delete this line and everything below "
+    "before saving ====== -->"
+)
+@
+
+<<functions>>=
+def compose_develop_edit_text(
+    step: TutorialStep,
+    *,
+    recorded: str,
+    verdict: bool,
+) -> str:
+    """Return editor pre-fill text: serialised step + marker + last run."""
+
+    verdict_label = "PASS" if verdict else "FAIL"
+    return (
+        f"{serialize_tutorial_step(step)}"
+        "\n"
+        f"{DEVELOP_RUN_MARKER}\n"
+        f"Verdict reported by the runner: {verdict_label}\n"
+        "Author said this verdict was wrong.\n"
+        "\n"
+        f"{recorded.rstrip()}\n"
+    )
+@
+
+<<functions>>=
+def strip_develop_run_marker(text: str) -> str:
+    """Return ``text`` with the develop run-marker section removed."""
+
+    head, sep, _ = text.partition(DEVELOP_RUN_MARKER)
+    if not sep:
+        return text
+    return head.rstrip() + "\n"
+@
+
+<<test functions>>=
+def test_compose_develop_edit_text_round_trips_step():
+    step = TutorialStep(
+        title="One",
+        instructions="Run pwd.",
+        required_patterns=(TextMatch("pwd"),),
+    )
+
+    rendered = compose_develop_edit_text(step, recorded="$ pwd\n/home\n", verdict=False)
+
+    assert DEVELOP_RUN_MARKER in rendered
+    stripped = strip_develop_run_marker(rendered)
+    assert DEVELOP_RUN_MARKER not in stripped
+    assert parse_tutorial_step_markdown(stripped) == step
+
+
+def test_strip_develop_run_marker_is_noop_when_absent():
+    text = "# Title\n\nbody.\n"
+
+    assert strip_develop_run_marker(text) == text
+@
+
+
+\subsection{Editing the step in [[\$EDITOR]]}
+
+Both new-step mode and the re-edit branch route through the same helper:
+write the pre-fill text to the editor, parse it back, and let the author
+correct parse errors interactively.  Errors print to the console and the
+helper re-opens the editor with the same buffer until the author either
+saves something parseable or ends the loop.
+
+<<functions>>=
+def edit_step_in_editor(
+    *,
+    console: Console,
+    workspace: str | Path,
+    relative_path: str,
+    initial_text: str,
+    editor_runner: Callable[..., EditorResult],
+    confirm: Callable[[str], bool],
+    sanitiser: Callable[[str], str] = lambda text: text,
+) -> TutorialStep | None:
+    """Open the editor and parse the saved file, retrying on parse errors."""
+
+    text_to_edit = initial_text
+    while True:
+        result = editor_runner(
+            workspace=workspace,
+            relative_path=relative_path,
+            initial_text=text_to_edit,
+        )
+        try:
+            return parse_tutorial_step_markdown(sanitiser(result.text))
+        except ValueError as error:
+            console.print(f"Step did not parse: {error}", style="red")
+            if not confirm("Re-open the editor to fix it?"):
+                return None
+            text_to_edit = result.text
+@
+
+
+\subsection{Registering the [[develop]] command}
+
+The command lives only on the standalone wrapper, mirroring [[install]]:
+embedded hosts do not register it, so they neither expose nor accept it.
+Inside the loop we reuse [[runner]]-equivalent wiring (shell, editor and
+question runners from the closure) directly, since the develop loop is
+allowed to ignore the persistence layer the runner factory threads in.
+
+<<register develop command>>=
+@application.command("develop")
+def develop_command(
+    tutorial_id: Annotated[
+        Optional[str],
+        typer.Argument(
+            help=(
+                "Tutorial ID for an existing step. Omit (with --step) to "
+                "draft a brand new step."
+            ),
+        ),
+    ] = None,
+    step: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="Step number (1-indexed) or a regex matching the step title.",
+        ),
+    ] = None,
+    tutorial_path: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--tutorial-path",
+            help=(
+                "Path to a tutorial Markdown file or directory. "
+                "Repeat to add more paths."
+            ),
+        ),
+    ] = None,
+    allow_shell_checks_flag: Annotated[
+        bool,
+        typer.Option(
+            "--allow-shell-checks/--deny-shell-checks",
+            help=(
+                "Allow author-supplied shell check_command validation "
+                "(default on for develop)."
+            ),
+        ),
+    ] = True,
+) -> None:
+    """Develop and test a single tutorial step."""
+
+    console = Console()
+
+    if (tutorial_id is None) != (step is None):
+        raise typer.BadParameter(
+            "Provide both TUTORIAL_ID and STEP for an existing step, or "
+            "neither to draft a new step.",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="tutorial-develop-") as workspace:
+        workspace_path = Path(workspace)
+
+        try:
+            current_step = resolve_initial_develop_step(
+                console=console,
+                tutorial_id=tutorial_id,
+                step_locator=step,
+                tutorial_path_arg=tutorial_path or [],
+                editor_runner=editor_runner,
+                workspace=workspace_path,
+            )
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1)
+        except KeyError as error:
+            raise typer.BadParameter(str(error), param_hint="tutorial_id")
+
+        if current_step is None:
+            typer.echo("Aborted before completing the new step.", err=True)
+            raise typer.Exit(code=1)
+
+        def prompt_for_input(prompt: str) -> str:
+            return typer.prompt(prompt)
+
+        command_question_runner = make_question_step_runner(
+            console=console,
+            prompt_for_input=prompt_for_input,
+            question_runner=question_runner,
+        )
+
+        final_step = develop_iterate(
+            console=console,
+            initial_step=current_step,
+            tutorial_id=tutorial_id or "develop",
+            workspace=workspace_path,
+            shell_runner=shell_runner,
+            editor_runner=editor_runner,
+            question_runner=command_question_runner,
+            allow_shell_checks=allow_shell_checks_flag,
+        )
+
+        final_source = serialize_tutorial_step(final_step)
+        console.print()
+        console.print("Final step source:", style="bold")
+        console.print()
+        typer.echo(final_source)
+@
+
+
+\subsection{Resolving the initial step from CLI arguments}
+
+The setup phase is small but distinct from the iterate-and-test loop, so
+it lives in its own helper.  New-step mode delegates to
+[[edit_step_in_editor]]; existing-step mode looks the tutorial up via the
+catalog using the same path resolution as [[list]]/[[run]]/[[review]].
+
+<<functions>>=
+def resolve_initial_develop_step(
+    *,
+    console: Console,
+    tutorial_id: str | None,
+    step_locator: str | None,
+    tutorial_path_arg: list[Path],
+    editor_runner: Callable[..., EditorResult],
+    workspace: Path,
+) -> TutorialStep | None:
+    """Return the step the develop loop should start with."""
+
+    if tutorial_id is None:
+        return edit_step_in_editor(
+            console=console,
+            workspace=workspace,
+            relative_path="step.md",
+            initial_text=DEVELOP_NEW_STEP_TEMPLATE,
+            editor_runner=editor_runner,
+            confirm=lambda prompt: typer.confirm(prompt, default=True),
+        )
+
+    catalog_paths = list(standalone_tutorial_paths())
+    catalog_paths.extend(tutorial_path_arg)
+    catalog = TutorialCatalog(tuple(catalog_paths))
+    tutorial = catalog.get_tutorial(tutorial_id)
+    return parse_step_locator(step_locator or "", tutorial.steps)
+@
+
+
+\subsection{The iterate-and-test loop}
+
+The loop owns the per-iteration concerns: render the prompt, run the
+backend, validate, ask the author whether the verdict was right, hand off
+to the editor when it was wrong, and decide whether to go round again.
+Splitting it out of the command callback keeps the registration body
+easy to scan and gives tests a smaller surface to target.
+
+<<functions>>=
+def develop_iterate(
+    *,
+    console: Console,
+    initial_step: TutorialStep,
+    tutorial_id: str,
+    workspace: Path,
+    shell_runner: Callable[..., ShellResult],
+    editor_runner: Callable[..., EditorResult],
+    question_runner: Callable[..., ShellResult],
+    allow_shell_checks: bool,
+) -> TutorialStep:
+    """Run the develop iterate-and-test loop and return the final step."""
+
+    step = initial_step
+    while True:
+        if step.edit_file is not None:
+            target = workspace / step.edit_file
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_text("")
+
+        render_step_prompt(
+            console,
+            "Develop",
+            1,
+            1,
+            step.title,
+            step.instructions,
+            str(workspace),
+            kind=step_kind(step),
+            options=step.options,
+            edit_file=step.edit_file,
+        )
+
+        try:
+            result = perform_step(
+                step,
+                tutorial_id=tutorial_id,
+                workspace=workspace,
+                shell_runner=shell_runner,
+                editor_runner=editor_runner,
+                question_runner=question_runner,
+            )
+        except RuntimeError as error:
+            typer.echo(str(error), err=True)
+            return step
+
+        recorded = recorded_text(result)
+        try:
+            verdict = validate_step(
+                step,
+                recorded,
+                workspace,
+                allow_shell_checks=allow_shell_checks,
+            )
+        except RuntimeError as error:
+            typer.echo(str(error), err=True)
+            return step
+
+        verdict_label = "PASS" if verdict else "FAIL"
+        verdict_style = "green" if verdict else "red"
+        console.print()
+        console.print(f"Verdict: {verdict_label}", style=f"bold {verdict_style}")
+
+        correct = typer.confirm("Is that verdict correct?", default=True)
+        if not correct:
+            edited = edit_step_in_editor(
+                console=console,
+                workspace=workspace,
+                relative_path="step.md",
+                initial_text=compose_develop_edit_text(
+                    step, recorded=recorded, verdict=verdict,
+                ),
+                editor_runner=editor_runner,
+                confirm=lambda prompt: typer.confirm(prompt, default=True),
+                sanitiser=strip_develop_run_marker,
+            )
+            if edited is not None:
+                step = edited
+
+        if not typer.confirm("Run the step again?", default=True):
+            return step
+@
+
+
+\subsection{End-to-end develop tests}
+
+The CliRunner-driven tests stub out only the parts develop should not be
+running for real: the shell runner, the editor runner, and the user-
+installed tutorial directory.  Everything else (catalog parsing,
+[[validate_step]], [[serialize_tutorial_step]], typer prompts) runs
+exactly the way it would for an author at the terminal.
+
+<<test functions>>=
+def _develop_no_user_tutorials(monkeypatch, tmp_path):
+    """Point user_tutorial_dir at an empty directory so it stays silent."""
+
+    empty_dir = tmp_path / "user-empty"
+    empty_dir.mkdir()
+    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: empty_dir)
+
+
+def _write_develop_demo(root: Path) -> Path:
+    """Write a tutorial with a unique ID so it does not collide with built-ins."""
+
+    tutorial_path = Path(root) / "develop-demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: develop-demo\n"
+        "title: Develop Demo\n"
+        "summary: A short tutorial for develop tests.\n"
+        "---\n\n"
+        "# Inspect the workspace\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - pwd\n"
+        "  - ls\n"
+        "hint: Run pwd and ls.\n"
+        "```\n\n"
+        "Run `pwd` and `ls`.\n\n"
+        "# Edit notes\n\n"
+        "```tutorial-step\n"
+        "edit_file: notes.txt\n"
+        "required_patterns:\n"
+        "  - tutorial\n"
+        "```\n\n"
+        "Add the word `tutorial` to `notes.txt`.\n"
+    )
+    return tutorial_path
+
+
+def test_develop_command_existing_step_passes_then_prints_source(
+    monkeypatch, tmp_path,
+):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+    tutorial_path = _write_develop_demo(tmp_path)
+
+    def fake_shell_runner(*, workspace, prompt_name=None):
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="$ pwd\n/tmp\n$ ls\nnotes.txt\n",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=fake_shell_runner,
+        ),
+        [
+            "develop",
+            "develop-demo",
+            "1",
+            "--tutorial-path",
+            str(tutorial_path),
+        ],
+        input="y\nn\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Verdict: PASS" in result.stdout
+    assert "Final step source:" in result.stdout
+    assert "# Inspect the workspace" in result.stdout
+
+
+def test_develop_command_resolves_step_by_regex(monkeypatch, tmp_path):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+    tutorial_path = _write_develop_demo(tmp_path)
+
+    def fake_shell_runner(*, workspace, prompt_name=None):
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="$ pwd\n/tmp\n$ ls\n",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=fake_shell_runner,
+        ),
+        [
+            "develop",
+            "develop-demo",
+            "^Inspect",
+            "--tutorial-path",
+            str(tutorial_path),
+        ],
+        input="y\nn\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "# Inspect the workspace" in result.stdout
+
+
+def test_develop_command_existing_step_reports_failure(monkeypatch, tmp_path):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+    tutorial_path = _write_develop_demo(tmp_path)
+
+    def fake_shell_runner(*, workspace, prompt_name=None):
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="$ echo hi\nhi\n",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=fake_shell_runner,
+        ),
+        [
+            "develop",
+            "develop-demo",
+            "1",
+            "--tutorial-path",
+            str(tutorial_path),
+        ],
+        input="y\nn\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Verdict: FAIL" in result.stdout
+
+
+def test_develop_command_new_step_uses_editor_template(monkeypatch, tmp_path):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+
+    edited_step_text = (
+        "# Drafted step\n"
+        "\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - hello\n"
+        "```\n"
+        "\n"
+        "Type hello.\n"
+    )
+
+    def fake_editor_runner(*, workspace, relative_path, initial_text=None):
+        Path(workspace, relative_path).write_text(edited_step_text)
+        return EditorResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            file_path=str(Path(workspace) / relative_path),
+            text=edited_step_text,
+        )
+
+    def fake_shell_runner(*, workspace, prompt_name=None):
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="$ echo hello\nhello\n",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=fake_shell_runner,
+            editor_runner=fake_editor_runner,
+        ),
+        ["develop"],
+        input="y\nn\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Verdict: PASS" in result.stdout
+    assert "# Drafted step" in result.stdout
+    assert "Type hello." in result.stdout
+
+
+def test_develop_command_edits_step_on_wrong_verdict(monkeypatch, tmp_path):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+    tutorial_path = _write_develop_demo(tmp_path)
+
+    revised_text = (
+        "# Inspect the workspace (revised)\n"
+        "\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - pwd\n"
+        "  - ls\n"
+        "  - cat\n"
+        "```\n"
+        "\n"
+        "Run pwd, ls, and cat.\n"
+    )
+
+    def fake_editor_runner(*, workspace, relative_path, initial_text=None):
+        Path(workspace, relative_path).write_text(revised_text)
+        return EditorResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            file_path=str(Path(workspace) / relative_path),
+            text=revised_text,
+        )
+
+    def fake_shell_runner(*, workspace, prompt_name=None):
+        return ShellResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            transcript="$ pwd\n/tmp\n$ ls\nnotes.txt\n",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=fake_shell_runner,
+            editor_runner=fake_editor_runner,
+        ),
+        [
+            "develop",
+            "develop-demo",
+            "1",
+            "--tutorial-path",
+            str(tutorial_path),
+        ],
+        input="n\nn\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "# Inspect the workspace (revised)" in result.stdout
+    assert "Run pwd, ls, and cat." in result.stdout
+
+
+def test_develop_command_rejects_partial_arguments(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(state_root=tmp_path / "state"),
+        ["develop", "develop-demo"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_develop_command_reports_unknown_tutorial(monkeypatch, tmp_path):
+    _develop_no_user_tutorials(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(state_root=tmp_path / "state"),
+        ["develop", "no-such-tutorial-id-xyz", "1"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_develop_command_hidden_in_embedded_typer_app(tmp_path):
+    parent = typer.Typer()
+    add_typer_subcommand(parent, state_root=tmp_path / "state")
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial"])
+
+    assert result.exit_code == 0
+    assert "develop" not in result.stdout
+
+
+def test_develop_command_visible_in_standalone_help(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(state_root=tmp_path / "state"),
+        [],
+    )
+
+    assert result.exit_code == 0
+    assert "develop" in result.stdout
 @

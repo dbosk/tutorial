@@ -1097,3 +1097,185 @@ def get_tutorial(
 
     return TutorialCatalog(tutorial_paths).get_tutorial(tutorial_id)
 @
+
+
+\section{Serialising one tutorial step back to Markdown}
+
+Authoring tools need to round-trip a [[TutorialStep]] through Markdown so an
+author can inspect the rendered source, drop it into a tutorial file, or
+re-open the same step for further editing.  Serialisation mirrors
+[[build_tutorial_step]]: only fields the parser would set are emitted, and
+recorded-text matches use the same string-or-mapping shape the parser
+already accepts.
+
+<<functions>>=
+def serialize_text_match(match: TextMatch) -> object:
+    """Return ``match`` as the YAML shape that ``text_match`` accepts."""
+
+    if match.mode == "contains":
+        return match.pattern
+    return {"mode": match.mode, "pattern": match.pattern}
+@
+
+<<functions>>=
+def step_metadata_for_serialization(step: TutorialStep) -> dict:
+    """Return the YAML metadata mapping for ``step`` (only non-default fields)."""
+
+    metadata: dict = {}
+    if step.kind is not None:
+        metadata["kind"] = step.kind
+    if step.options:
+        metadata["options"] = list(step.options)
+    if step.answers:
+        if step.kind == "input":
+            metadata["answers"] = [
+                serialize_text_match(answer) for answer in step.answers
+            ]
+        else:
+            metadata["answers"] = list(step.answers)
+    if step.required_patterns:
+        metadata["required_patterns"] = [
+            serialize_text_match(pattern) for pattern in step.required_patterns
+        ]
+    if step.check_command is not None:
+        metadata["check_command"] = step.check_command
+    if step.hint is not None:
+        metadata["hint"] = step.hint
+    if step.edit_file is not None:
+        metadata["edit_file"] = step.edit_file
+    return metadata
+@
+
+<<functions>>=
+def serialize_tutorial_step(step: TutorialStep) -> str:
+    """Render ``step`` as the Markdown a tutorial file would contain."""
+
+    parts = [f"# {step.title}", ""]
+    metadata = step_metadata_for_serialization(step)
+    if metadata:
+        body = yaml.safe_dump(
+            metadata,
+            sort_keys=False,
+            default_flow_style=False,
+        ).rstrip()
+        parts.extend([STEP_METADATA_FENCE, body, "```", ""])
+    parts.append(step.instructions.rstrip())
+    return "\n".join(parts) + "\n"
+@
+
+<<test functions>>=
+def test_serialize_tutorial_step_round_trips_minimal_step():
+    step = TutorialStep(
+        title="Step one",
+        instructions="Run `pwd`.",
+    )
+
+    rendered = serialize_tutorial_step(step)
+
+    assert "```tutorial-step" not in rendered
+    sections = split_step_sections(rendered)
+    assert len(sections) == 1
+    title, body = sections[0]
+    assert title == "Step one"
+    assert build_tutorial_step(title, body) == step
+
+
+def test_serialize_tutorial_step_round_trips_step_with_metadata():
+    step = TutorialStep(
+        title="Edit notes",
+        instructions="Open `notes.txt` and add your name.",
+        required_patterns=(
+            TextMatch("name"),
+            TextMatch("^A.*", mode="regex"),
+        ),
+        check_command="test -s notes.txt",
+        hint="Try `vim notes.txt`.",
+        edit_file="notes.txt",
+    )
+
+    rendered = serialize_tutorial_step(step)
+
+    sections = split_step_sections(rendered)
+    title, body = sections[0]
+    assert build_tutorial_step(title, body) == step
+
+
+def test_serialize_tutorial_step_round_trips_input_question():
+    step = TutorialStep(
+        title="Type the command",
+        instructions="Type `pwd`.",
+        kind="input",
+        answers=(TextMatch("pwd"),),
+    )
+
+    rendered = serialize_tutorial_step(step)
+
+    sections = split_step_sections(rendered)
+    title, body = sections[0]
+    assert build_tutorial_step(title, body) == step
+
+
+def test_serialize_tutorial_step_round_trips_select_question():
+    step = TutorialStep(
+        title="Pick the listing command",
+        instructions="Choose the command that lists files.",
+        kind="single_select",
+        options=("pwd", "ls", "cd"),
+        answers=("ls",),
+    )
+
+    rendered = serialize_tutorial_step(step)
+
+    sections = split_step_sections(rendered)
+    title, body = sections[0]
+    assert build_tutorial_step(title, body) == step
+@
+
+
+\section{Parsing one tutorial step from Markdown}
+
+The [[develop]] command reads back what an author edited and needs the same
+guarantees as [[load_tutorial_file]]: exactly one heading, valid metadata,
+recognisable interaction shape.  The single-step parser is a thin wrapper
+over [[split_step_sections]] and [[build_tutorial_step]] so the rules stay
+in one place.
+
+<<functions>>=
+def parse_tutorial_step_markdown(text: str) -> TutorialStep:
+    """Parse a single-step Markdown blob (heading + body) into a [[TutorialStep]]."""
+
+    sections = split_step_sections(text)
+    if len(sections) != 1:
+        raise ValueError(
+            "Expected exactly one '# ' step heading; "
+            f"found {len(sections)}."
+        )
+    title, body = sections[0]
+    return build_tutorial_step(title, body)
+@
+
+<<test functions>>=
+def test_parse_tutorial_step_markdown_round_trips_minimal_step():
+    rendered = (
+        "# Step one\n"
+        "\n"
+        "Run `pwd`.\n"
+    )
+
+    step = parse_tutorial_step_markdown(rendered)
+
+    assert step.title == "Step one"
+    assert step.instructions == "Run `pwd`."
+
+
+def test_parse_tutorial_step_markdown_rejects_zero_headings():
+    with pytest.raises(ValueError):
+        parse_tutorial_step_markdown("Just some text without a heading.\n")
+
+
+def test_parse_tutorial_step_markdown_rejects_multiple_headings():
+    with pytest.raises(ValueError):
+        parse_tutorial_step_markdown(
+            "# Step one\n\nFirst.\n\n# Step two\n\nSecond.\n"
+        )
+@
