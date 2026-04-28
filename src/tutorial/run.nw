@@ -1558,15 +1558,18 @@ Transcript checks still default to literal matching, but interactive shell
 transcripts contain noise that students do not control: carriage returns,
 ANSI control sequences, and small whitespace differences from completion or
 line editing.  Some shells also record readline redraws literally, so one
-accepted command may appear as text, a backspace, and the replacement
-characters that followed it.  Tab completion can also leave behind bell
-characters or similar control bytes that the student never intended as part
-of the command.  We therefore normalise those details before checking plain
-string patterns.  Tutorials that truly need more control can opt into an
-explicit regular expression.
+accepted command may appear as raw cursor-key input, cursor motion, insert and
+delete operations, and the replacement characters that followed them.  That
+includes simple arrows, modified arrows such as Ctrl-Left and Ctrl-Right, and
+word-oriented motion such as Alt-b and Alt-f when readline redraws the line.
+Tab completion can also leave behind bell characters or similar control bytes
+that the student never intended as part of the command.  We therefore
+normalise those details before checking plain string patterns.  Tutorials that
+truly need more control can opt into an explicit regular expression.
 
 <<constants>>=
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CARET_CSI_RE = re.compile(r"\^\[\[[0-?]*[ -/]*[@-~]")
 WHITESPACE_RE = re.compile(r"\s+")
 @
 
@@ -1581,33 +1584,200 @@ def strip_terminal_controls(text: str) -> str:
     )
 @
 
+When scripted tests write escape bytes into the PTY before readline takes
+control, the transcript can contain caret-escaped CSI sequences such as
+[[^[[D]].  Converting those back into actual CSI bytes lets the rest of the
+normaliser replay both scripted and interactive transcripts with the same
+logic.
+
+<<functions>>=
+def expand_caret_csi_notation(text: str) -> str:
+    """Return ``text`` with caret-escaped CSI sequences restored."""
+
+    return CARET_CSI_RE.sub(
+        lambda match: "\x1b[" + match.group(0)[3:],
+        text,
+    )
+@
+
+We cannot simply strip every CSI sequence up front, because some of them are
+the edit itself: cursor-left, cursor-right, insert-character,
+delete-character, and erase-to-end change which characters remain visible on
+the line.  We therefore parse the small subset of CSI sequences that readline
+uses for line repair and ignore the rest as non-semantic terminal control.
+
+<<functions>>=
+def parse_csi_sequence(text: str, start: int) -> tuple[str, int] | None:
+    """Return one CSI sequence and the next index from ``start``."""
+
+    if not text.startswith("\x1b[", start):
+        return None
+
+    index = start + 2
+    while index < len(text):
+        if "@" <= text[index] <= "~":
+            return text[start : index + 1], index + 1
+        index += 1
+    return None
+@
+
+<<functions>>=
+def csi_count(parameter: str) -> int | None:
+    """Return the repeat count for one simple CSI parameter."""
+
+    if not parameter:
+        return 1
+    if parameter.isdigit():
+        return int(parameter)
+    return None
+@
+
+<<functions>>=
+def apply_csi_sequence(
+    line: list[str],
+    cursor: int,
+    sequence: str,
+) -> tuple[list[str], int]:
+    """Return ``(line, cursor)`` after replaying one CSI edit."""
+
+    parameter = sequence[2:-1]
+    final = sequence[-1]
+
+    if final == "C":
+        count = csi_count(parameter)
+        if count is not None:
+            return line, cursor + count
+        return line, cursor
+
+    if final == "D":
+        count = csi_count(parameter)
+        if count is not None:
+            return line, max(0, cursor - count)
+        return line, cursor
+
+    if final == "P":
+        count = csi_count(parameter)
+        if count is not None:
+            del line[cursor : cursor + count]
+        return line, cursor
+
+    if final == "@":
+        count = csi_count(parameter)
+        if count is not None:
+            line[cursor:cursor] = [" "] * count
+        return line, cursor
+
+    if final == "K" and parameter in {"", "0"}:
+        del line[cursor:]
+        return line, cursor
+
+    if final in {"F", "~"} and parameter in {"4"}:
+        return line, len(line)
+
+    if final in {"H", "~"} and parameter in {"", "1", "7"}:
+        return line, 0
+
+    return line, cursor
+@
+
+<<functions>>=
+def move_cursor_by_words(line: list[str], cursor: int, count: int, *, forward: bool) -> int:
+    """Return ``cursor`` moved by ``count`` shell-style word jumps."""
+
+    for _ in range(count):
+        if forward:
+            while cursor < len(line) and line[cursor].isspace():
+                cursor += 1
+            while cursor < len(line) and not line[cursor].isspace():
+                cursor += 1
+            continue
+
+        while cursor > 0 and line[cursor - 1].isspace():
+            cursor -= 1
+        while cursor > 0 and not line[cursor - 1].isspace():
+            cursor -= 1
+
+    return cursor
+@
+
+Modified-arrow and Alt-key motion matter because readline often redraws them as
+plain cursor movement plus insert operations.  Replaying shell-style word jumps
+keeps the cursor aligned with where the student actually inserted or deleted
+text, even when the original transcript only shows the raw control sequence.
+
 <<functions>>=
 def apply_line_editing(text: str) -> str:
-    """Return ``text`` after applying simple backspace-style edits."""
+    """Return ``text`` after replaying terminal line editing."""
 
-    characters = []
-    for character in text:
-        if character in {"\b", "\x7f"}:
-            if characters:
-                characters.pop()
+    text = expand_caret_csi_notation(text)
+    rendered = []
+    line = []
+    cursor = 0
+    index = 0
+    while index < len(text):
+        parsed = parse_csi_sequence(text, index)
+        if parsed is not None:
+            sequence, index = parsed
+            line, cursor = apply_csi_sequence(line, cursor, sequence)
             continue
-        characters.append(character)
-    return "".join(characters)
+
+        character = text[index]
+        index += 1
+
+        if character == "\x1b" and index < len(text):
+            next_character = text[index]
+            if next_character in {"b", "f"}:
+                index += 1
+                cursor = move_cursor_by_words(
+                    line,
+                    cursor,
+                    1,
+                    forward=next_character == "f",
+                )
+                continue
+
+        if character == "\r":
+            cursor = 0
+            continue
+        if character == "\n":
+            rendered.append("".join(line))
+            rendered.append("\n")
+            line = []
+            cursor = 0
+            continue
+        if character in {"\b", "\x7f"}:
+            cursor = max(0, cursor - 1)
+            continue
+        if ord(character) < 0x20 and character != "\t":
+            continue
+
+        if cursor > len(line):
+            line.extend(" " for _ in range(cursor - len(line)))
+        if cursor == len(line):
+            line.append(character)
+        else:
+            line[cursor] = character
+        cursor += 1
+
+    if line:
+        rendered.append("".join(line))
+    return "".join(rendered)
 @
 
 Readline redraw sequences matter here because a recorded backspace is not
-student-visible output; it only means the terminal overwrote the previous
-character.  Applying those edits after stripping ANSI sequences recovers the
-command the student actually left on screen.  We then drop any remaining
-control characters such as the bell byte from failed or partial tab
-completion, because those are terminal feedback rather than authored input.
+student-visible output; it only means the terminal moved the cursor before
+rewriting part of the line.  Replaying backspaces, carriage returns, and the
+relevant CSI edit operations recovers the command the student actually left on
+screen.  We then drop any remaining control characters such as the bell byte
+from failed or partial tab completion, because those are terminal feedback
+rather than authored input.
 
 <<functions>>=
 def normalise_recorded_text(text: str) -> str:
     """Return ``text`` without terminal control noise."""
 
-    text = ANSI_ESCAPE_RE.sub("", text)
     text = apply_line_editing(text)
+    text = ANSI_ESCAPE_RE.sub("", text)
     text = strip_terminal_controls(text)
     text = text.replace("\r", "\n")
     return text
@@ -1698,6 +1868,78 @@ def test_transcript_matches_patterns_ignores_tab_completion_bell():
             TextMatch("tutorial list --tutorial-path my-tutorials"),
             TextMatch("greeting"),
         ),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_cursor_left_insertions():
+    assert transcript_matches_patterns(
+        "echo hllo^[[D^[[D^[[De\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo hllo\b\b\bello\b\b\b\r\n"
+        "\x1b[?2004l\rhello\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo hello"), TextMatch("hello")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_delete_key_edits():
+    assert transcript_matches_patterns(
+        "echo helllo^[[D^[[D^[[D^[[3~\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo helllo\b\b\b\x1b[C\x1b[1Po\b\b\r\n"
+        "\x1b[?2004l\rhello\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo hello"), TextMatch("hello")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_alt_word_jumps():
+    assert transcript_matches_patterns(
+        "echo alph beta^[b^[b^[fa\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo alph beta\b\b\b\b\b\b\b\b\b"
+        "\x1b[C\x1b[C\x1b[C\x1b[Ca beta\b\b\b\b\b\r\n"
+        "\x1b[?2004l\ralpha beta\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo alpha beta"), TextMatch("alpha beta")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_modified_arrow_word_jumps():
+    assert transcript_matches_patterns(
+        "echo alpha gamma^[[1;5D^[[1;5Dbeta \r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo alpha gamma\b\b\b\b\b\b\b\b\b"
+        "\b\b\x1b[5@beta \r\n"
+        "\x1b[?2004l\rbeta alpha gamma\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo beta alpha gamma"), TextMatch("beta alpha gamma")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_home_and_end_navigation():
+    assert transcript_matches_patterns(
+        "echo hello^[[F world\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo hello world\r\n"
+        "\x1b[?2004l\rhello world\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo hello world"), TextMatch("hello world")),
+    ) is True
+
+    assert transcript_matches_patterns(
+        "echo hello^[[4~ world\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo hello world\r\n"
+        "\x1b[?2004l\rhello world\r\n"
+        "\x1b[?2004haudit $ exit\r\n"
+        "\x1b[?2004l\rexit\r\n",
+        (TextMatch("echo hello world"), TextMatch("hello world")),
     ) is True
 
 
