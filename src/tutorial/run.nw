@@ -1557,9 +1557,11 @@ def test_validate_step_treats_multi_select_answers_as_sets(tmp_path):
 Transcript checks still default to literal matching, but interactive shell
 transcripts contain noise that students do not control: carriage returns,
 ANSI control sequences, and small whitespace differences from completion or
-line editing.  We therefore normalise those details before checking plain
-string patterns.  Tutorials that truly need more control can opt into an
-explicit regular expression.
+line editing.  Some shells also record readline redraws literally, so one
+accepted command may appear as text, a backspace, and the replacement
+characters that followed it.  We therefore normalise those details before
+checking plain string patterns.  Tutorials that truly need more control can
+opt into an explicit regular expression.
 
 <<constants>>=
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -1567,10 +1569,30 @@ WHITESPACE_RE = re.compile(r"\s+")
 @
 
 <<functions>>=
+def apply_line_editing(text: str) -> str:
+    """Return ``text`` after applying simple backspace-style edits."""
+
+    characters = []
+    for character in text:
+        if character in {"\b", "\x7f"}:
+            if characters:
+                characters.pop()
+            continue
+        characters.append(character)
+    return "".join(characters)
+@
+
+Readline redraw sequences matter here because a recorded backspace is not
+student-visible output; it only means the terminal overwrote the previous
+character.  Applying those edits after stripping ANSI sequences recovers the
+command the student actually left on screen.
+
+<<functions>>=
 def normalise_recorded_text(text: str) -> str:
     """Return ``text`` without terminal control noise."""
 
     text = ANSI_ESCAPE_RE.sub("", text)
+    text = apply_line_editing(text)
     text = text.replace("\r", "\n")
     return text
 @
@@ -1635,6 +1657,19 @@ def test_transcript_matches_patterns_ignores_ansi_control_sequences():
     assert transcript_matches_patterns(
         "\x1b[1mshell-basics $ \x1b[0mpwd\n",
         (TextMatch("shell-basics $"),),
+    ) is True
+
+
+def test_transcript_matches_patterns_ignores_line_redraw_backspaces():
+    assert transcript_matches_patterns(
+        "\x1b[?2004hwriting-tutorials $ mkdir my-to\b\x1b[Kutorials\r\n"
+        "\x1b[?2004l\r\x1b[?2004hwriting-tutorials $ ls\r\n"
+        "\x1b[?2004l\rmy-tutorials\r\n",
+        (
+            TextMatch("mkdir my-tutorials"),
+            TextMatch("ls"),
+            TextMatch("my-tutorials"),
+        ),
     ) is True
 
 
