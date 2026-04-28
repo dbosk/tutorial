@@ -37,7 +37,8 @@ Run `tutorial run --restart shell-basics`.
 
 The `run` command starts or resumes saved work. We use `--restart` here so
 this step behaves the same way even if you have already finished
-`shell-basics` before.
+`shell-basics` before. `--restart` discards every saved transcript for that
+tutorial, not just the step you are about to revisit.
 
 Because this lesson is already running, the nested shell prompt changes to
 `shell-basics $ ` so you can tell which tutorial owns the current shell.
@@ -168,9 +169,44 @@ session is still in progress, the review output can show the earlier saved
 steps, but it cannot show this step until after you exit the shell and the
 step is recorded.
 
-At this point you have seen the tutorial workflow end to end:
+At this point you have seen the main run-and-review workflow end to end:
 
 - `tutorial list` discovers what you can run
 - `tutorial run` starts or resumes one tutorial at a time
 - question steps can ask for input, one choice, or several choices
 - `tutorial review` inspects the saved record afterwards
+
+# Inspect one step of the saved run
+
+```tutorial-step
+required_patterns:
+  - tutorial review using-tutorials --step 1
+  - "Step 1: List the available tutorials"
+hint: Review only step 1 from inside this shell.
+```
+
+Run `tutorial review using-tutorials --step 1`.
+
+`--step N` narrows the review to one 1-indexed step instead of the whole
+run. Review normally shows the latest saved run for that tutorial; use
+`--run-id <id>` to pick an older one instead. `tutorial review --help`
+shows the full form.
+
+# Install a tutorial from a file or URL
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: ^tutorial\s+install\s+\S+(?:\s+--force)?\s*$
+hint: Type an install command with a file path or URL.
+```
+
+Type a command such as `tutorial install ./lesson.md` or
+`tutorial install https://example.com/lesson.md --force`.
+
+`tutorial install <source>` copies a tutorial Markdown file into your
+installed tutorial directory so it appears in `tutorial list` alongside the
+built-ins. Add `--force` to overwrite an installed tutorial with the same
+`id`. This question step only records your answer, so you can practice the
+command safely without installing anything.
