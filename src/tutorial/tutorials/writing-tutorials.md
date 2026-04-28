@@ -104,7 +104,7 @@ edit_file: my-tutorials/greeting.md
 required_patterns:
   - "required_patterns:"
   - "  - mode: regex"
-  - '    pattern: (?m)echo hello(?:\\s+)?$'
+  - '    pattern: (?m)echo hello(?:\s+)?$'
 ```
 
 Keep the same tutorial, the same step title, and the same command, but

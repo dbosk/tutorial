@@ -1273,6 +1273,11 @@ The runner stores both shell sessions and editor sessions as step
 transcripts so the state layer can persist them without knowing anything
 about validation policy.
 
+Editor-backed review is easier to understand when it keeps the tutorial's
+authored relative path, not just the basename of the file on disk.  That
+way a step editing [[my-tutorials/greeting.md]] still reviews as that same
+path instead of the ambiguous [[greeting.md]].
+
 <<functions>>=
 def build_step_transcript(
     *,
@@ -1294,7 +1299,7 @@ def build_step_transcript(
             exit_status=step_result.exit_status,
             transcript=step_result.text,
             passed=passed,
-            edited_file=Path(step_result.file_path).name,
+            edited_file=step.edit_file,
         )
 
     return StepTranscript(
@@ -1355,6 +1360,30 @@ def test_build_step_transcript_marks_editor_source_file():
 
     assert transcript.transcript == "tutorial\n"
     assert transcript.edited_file == "notes.txt"
+
+
+def test_build_step_transcript_keeps_nested_editor_path():
+    step = TutorialStep(
+        title="Edit tutorial",
+        instructions="Open my-tutorials/greeting.md.",
+        edit_file="my-tutorials/greeting.md",
+    )
+
+    transcript = build_step_transcript(
+        tutorial_id="writing-tutorials",
+        step_index=1,
+        step=step,
+        step_result=EditorResult(
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            exit_status=0,
+            file_path="/tmp/demo/my-tutorials/greeting.md",
+            text="---\nid: greeting\n",
+        ),
+        passed=True,
+    )
+
+    assert transcript.edited_file == "my-tutorials/greeting.md"
 @
 
 
