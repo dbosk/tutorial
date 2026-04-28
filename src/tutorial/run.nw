@@ -1563,9 +1563,15 @@ delete operations, and the replacement characters that followed them.  That
 includes simple arrows, modified arrows such as Ctrl-Left and Ctrl-Right, and
 word-oriented motion such as Alt-b and Alt-f when readline redraws the line.
 Tab completion can also leave behind bell characters or similar control bytes
-that the student never intended as part of the command.  We therefore
-normalise those details before checking plain string patterns.  Tutorials that
-truly need more control can opt into an explicit regular expression.
+that the student never intended as part of the command.  Modern shells add a
+last layer on top of that: terminal-title and prompt-marker strings introduced
+by [[\x1b]]] (OSC) or [[\x1bP]] (DCS) bracket their payload between an
+introducer and a string terminator, keypad-mode flips such as [[\x1b=]] and
+[[\x1b>]] surround every prompt, and shells in application-cursor mode emit
+SS3 sequences such as [[\x1bOC]] in place of the more familiar CSI form.  We
+therefore normalise those details before checking plain string patterns.
+Tutorials that truly need more control can opt into an explicit regular
+expression.
 
 <<constants>>=
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -1632,6 +1638,21 @@ def csi_count(parameter: str) -> int | None:
     return None
 @
 
+Modifier-aware arrow keys carry the cursor position and the active modifier
+in a [[1;<mod>]] parameter.  Recognising that shape separately keeps
+[[csi_count]] focused on plain repeat counts while still letting
+[[apply_csi_sequence]] route Ctrl-arrow and Alt-arrow into word-jump motion.
+
+<<functions>>=
+def csi_modifier(parameter: str) -> int | None:
+    """Return the modifier value for ``\\x1b[1;<mod>`` style parameters."""
+
+    parts = parameter.split(";")
+    if len(parts) == 2 and parts[0] == "1" and parts[1].isdigit():
+        return int(parts[1])
+    return None
+@
+
 <<functions>>=
 def apply_csi_sequence(
     line: list[str],
@@ -1642,17 +1663,23 @@ def apply_csi_sequence(
 
     parameter = sequence[2:-1]
     final = sequence[-1]
+    modifier = csi_modifier(parameter)
+    word_modifiers = {3, 5, 7}
 
     if final == "C":
         count = csi_count(parameter)
         if count is not None:
             return line, cursor + count
+        if modifier in word_modifiers:
+            return line, move_cursor_by_words(line, cursor, 1, forward=True)
         return line, cursor
 
     if final == "D":
         count = csi_count(parameter)
         if count is not None:
             return line, max(0, cursor - count)
+        if modifier in word_modifiers:
+            return line, move_cursor_by_words(line, cursor, 1, forward=False)
         return line, cursor
 
     if final == "P":
@@ -1667,14 +1694,32 @@ def apply_csi_sequence(
             line[cursor:cursor] = [" "] * count
         return line, cursor
 
-    if final == "K" and parameter in {"", "0"}:
-        del line[cursor:]
+    if final == "K":
+        if parameter in {"", "0"}:
+            del line[cursor:]
+            return line, cursor
+        if parameter == "1":
+            del line[:cursor]
+            return line, 0
+        if parameter == "2":
+            line.clear()
+            return line, 0
         return line, cursor
 
-    if final in {"F", "~"} and parameter in {"4"}:
+    if final == "F":
+        if parameter in {"", "4"} or modifier is not None:
+            return line, len(line)
+        return line, cursor
+
+    if final == "H":
+        if parameter in {"", "1", "7"} or modifier is not None:
+            return line, 0
+        return line, cursor
+
+    if final == "~" and parameter == "4":
         return line, len(line)
 
-    if final in {"H", "~"} and parameter in {"", "1", "7"}:
+    if final == "~" and parameter in {"1", "7"}:
         return line, 0
 
     return line, cursor
@@ -1704,6 +1749,14 @@ Modified-arrow and Alt-key motion matter because readline often redraws them as
 plain cursor movement plus insert operations.  Replaying shell-style word jumps
 keeps the cursor aligned with where the student actually inserted or deleted
 text, even when the original transcript only shows the raw control sequence.
+Two more shapes share the same concern.  SS3 sequences ([[\x1bO]] followed by a
+single final byte) appear when the shell switches the keypad into application
+mode and arrow keys then emit [[\x1bOC]] / [[\x1bOD]] instead of CSI; without
+explicit handling the loop drops the [[\x1b]] but inserts the [[O]] and the
+final byte as content.  Likewise, two-byte ESC pairs such as [[\x1b=]],
+[[\x1b>]], [[\x1b7]], and [[\x1b8]] toggle keypad mode or save the cursor for
+later restoration; their second byte must be consumed alongside the [[\x1b]]
+or it leaks into the matched line.
 
 <<functions>>=
 def apply_line_editing(text: str) -> str:
@@ -1735,6 +1788,21 @@ def apply_line_editing(text: str) -> str:
                     forward=next_character == "f",
                 )
                 continue
+            if next_character == "O" and index + 1 < len(text):
+                ss3_final = text[index + 1]
+                index += 2
+                if ss3_final == "C":
+                    cursor = cursor + 1
+                elif ss3_final == "D":
+                    cursor = max(0, cursor - 1)
+                elif ss3_final == "H":
+                    cursor = 0
+                elif ss3_final == "F":
+                    cursor = len(line)
+                continue
+            if next_character in {"=", ">", "7", "8"}:
+                index += 1
+                continue
 
         if character == "\r":
             cursor = 0
@@ -1764,6 +1832,55 @@ def apply_line_editing(text: str) -> str:
     return "".join(rendered)
 @
 
+\subsection{Stripping string-terminated controls}
+
+OSC (Operating System Command) and DCS (Device Control String) sequences sit
+outside the CSI grammar that [[ANSI_ESCAPE_RE]] and [[apply_csi_sequence]]
+recognise: their payload runs between an introducer ([[\x1b]]] for OSC,
+[[\x1bP]] for DCS) and a string terminator (either [[\x07]] or [[\x1b\\]]),
+and the bytes in between can be arbitrary.  Modern terminals use them for
+window titles, FinalTerm/iTerm prompt markers, and OSC~8 hyperlinks, all of
+which are common in a student's prompt theme.  If we let those payloads reach
+[[apply_line_editing]], the [[\x1b]] is dropped as a control byte but the
+[[]]] or [[P]] and the rest of the payload are inserted as content, leaving
+fragments such as [[]0;hello]] in the matched text.  We therefore remove whole
+strings up front, before any line-edit replay.
+
+<<constants>>=
+OSC_DCS_RE = re.compile(r"\x1b[\]P][^\x07\x1b]*(?:\x07|\x1b\\)")
+@
+
+<<functions>>=
+def strip_string_terminators(text: str) -> str:
+    """Return ``text`` without OSC and DCS string-terminated sequences."""
+
+    return OSC_DCS_RE.sub("", text)
+@
+
+Let's verify that all three common string-terminated forms disappear, including
+the OSC~8 hyperlink which uses both an introducer-prefix and a separate close.
+
+<<test functions>>=
+def test_strip_string_terminators_removes_osc_and_dcs():
+    cleaned = strip_string_terminators(
+        "\x1b]0;tab title\x07start\x1b]133;A\x1b\\middle"
+        "\x1bPq sixel \x1b\\end"
+    )
+
+    assert cleaned == "startmiddleend"
+
+
+def test_strip_string_terminators_removes_osc_hyperlink_pair():
+    cleaned = strip_string_terminators(
+        "\x1b]8;;https://example.test\x07click\x1b]8;;\x07!"
+    )
+
+    assert cleaned == "click!"
+@
+
+
+\subsection{Composing the full normaliser}
+
 Readline redraw sequences matter here because a recorded backspace is not
 student-visible output; it only means the terminal moved the cursor before
 rewriting part of the line.  Replaying backspaces, carriage returns, and the
@@ -1772,10 +1889,17 @@ screen.  We then drop any remaining control characters such as the bell byte
 from failed or partial tab completion, because those are terminal feedback
 rather than authored input.
 
+The string-terminated scrubber runs first so OSC and DCS payloads never enter
+the line buffer; the line-edit replay then resolves the cursor-motion and
+edit-in-place CSI operations; the leftover non-edit CSI sequences (colours,
+mode toggles, cursor-position reports) are erased by [[ANSI_ESCAPE_RE]]; and
+[[strip_terminal_controls]] removes any final stray bytes such as the bell.
+
 <<functions>>=
 def normalise_recorded_text(text: str) -> str:
     """Return ``text`` without terminal control noise."""
 
+    text = strip_string_terminators(text)
     text = apply_line_editing(text)
     text = ANSI_ESCAPE_RE.sub("", text)
     text = strip_terminal_controls(text)
@@ -1948,6 +2072,86 @@ def test_transcript_matches_patterns_can_use_regex_mode():
         "tutorial run --restart shell-basics   \n",
         (TextMatch(r"tutorial run --restart shell-basics\s*", mode="regex"),),
     ) is True
+
+
+def test_transcript_matches_patterns_strips_osc_title_and_prompt_markers():
+    assert transcript_matches_patterns(
+        "\x1b]0;writing-tutorials\x07\x1b]133;A\x1b\\"
+        "\x1b[?2004hwriting-tutorials $ tutorial list\r\n"
+        "\x1b]133;C\x07\x1b[?2004l\rgreeting\r\n",
+        (
+            TextMatch("tutorial list"),
+            TextMatch("greeting"),
+        ),
+    ) is True
+
+
+def test_transcript_matches_patterns_strips_osc_hyperlink_payload():
+    assert transcript_matches_patterns(
+        "\x1b[?2004haudit $ open "
+        "\x1b]8;;https://example.test\x07docs\x1b]8;;\x07\r\n"
+        "\x1b[?2004l\ropened docs\r\n",
+        (TextMatch("open docs"), TextMatch("opened docs")),
+    ) is True
+
+
+def test_transcript_matches_patterns_ignores_keypad_mode_switches():
+    assert transcript_matches_patterns(
+        "\x1b=\x1b[?2004haudit $ echo hi\r\n"
+        "\x1b[?2004l\rhi\r\n\x1b>",
+        (TextMatch("echo hi"), TextMatch("hi")),
+    ) is True
+
+
+def test_transcript_matches_patterns_ignores_save_and_restore_cursor():
+    assert transcript_matches_patterns(
+        "\x1b7\x1b[?2004haudit $ echo hi\r\n"
+        "\x1b8\x1b[?2004l\rhi\r\n",
+        (TextMatch("echo hi"), TextMatch("hi")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_ss3_arrow_navigation():
+    assert transcript_matches_patterns(
+        "echo hllo\x1bOD\x1bOD\x1bODe\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo hllo\b\b\bello\b\b\b\r\n"
+        "\x1b[?2004l\rhello\r\n",
+        (TextMatch("echo hello"), TextMatch("hello")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_ctrl_arrow_word_jumps():
+    assert transcript_matches_patterns(
+        "echo alpha beta\x1b[1;5D\x1b[1;5DX\r\n"
+        "exit\r\n"
+        "\x1b[?2004haudit $ echo Xlpha beta\r\n"
+        "\x1b[?2004l\rXlpha beta\r\n",
+        (TextMatch("echo Xlpha beta"), TextMatch("Xlpha beta")),
+    ) is True
+    assert transcript_matches_patterns(
+        "echo alpha beta\x1b[1;5C\x1b[1;5C!\r\n",
+        (TextMatch("echo alpha beta"),),
+    ) is True
+
+
+def test_transcript_matches_patterns_handles_plain_csi_end_navigation():
+    assert transcript_matches_patterns(
+        "echo hello\x1b[F world\r\n"
+        "echo done\r\n",
+        (TextMatch("echo hello world"), TextMatch("echo done")),
+    ) is True
+
+
+def test_transcript_matches_patterns_replays_full_line_erase():
+    assert transcript_matches_patterns(
+        "echo wrong\r\x1b[2Kecho right\r\n",
+        (TextMatch("echo right"),),
+    ) is True
+    assert transcript_matches_patterns(
+        "echo wrong\r\x1b[2Kecho right\r\n",
+        (TextMatch("echo wrong"),),
+    ) is False
 @
 
 
