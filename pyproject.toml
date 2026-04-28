@@ -1,5 +1,5 @@
 [project]
-name = "tutorial"
+name = "interactive-tutorial"
 version = "0.1"
 description = "Interactive command-line tutorials with PTY-backed steps"
 license = "MIT"
