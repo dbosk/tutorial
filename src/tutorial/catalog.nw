@@ -478,6 +478,14 @@ Each top-level heading begins a new tutorial step.  Lower-level headings
 remain part of the step body, which lets tutorial authors keep ordinary
 Markdown structure inside a step.
 
+Fenced examples create one important contrast: a line that begins with
+[[# ]] can either be a real step heading or just example content inside a
+code block.  That matters in [[writing-tutorials]], where one step shows a
+Markdown example containing [[# Say hello]] and later steps use longer
+outer fences to quote shorter inner [[tutorial-step]] fences.  We
+therefore remember the currently open fence delimiter and only treat
+[[# ]] as a new step heading when no fence is open.
+
 <<functions>>=
 def split_step_sections(body: str) -> tuple[tuple[str, str], ...]:
     """Return ``(title, body)`` pairs for each top-level step heading."""
@@ -485,15 +493,23 @@ def split_step_sections(body: str) -> tuple[tuple[str, str], ...]:
     sections = []
     title = None
     body_lines = []
+    open_fence = None
     for line in body.splitlines():
-        if line.startswith("# "):
-            if title is not None:
-                sections.append((title, "\n".join(body_lines).strip()))
-            title = line[2:].strip()
-            if not title:
-                raise ValueError("Tutorial step headings must not be empty.")
-            body_lines = []
-            continue
+        stripped = line.lstrip()
+        if open_fence is None:
+            if stripped.startswith("```"):
+                width = len(stripped) - len(stripped.lstrip("`"))
+                open_fence = "`" * width
+            elif line.startswith("# "):
+                if title is not None:
+                    sections.append((title, "\n".join(body_lines).strip()))
+                title = line[2:].strip()
+                if not title:
+                    raise ValueError("Tutorial step headings must not be empty.")
+                body_lines = []
+                continue
+        elif stripped.startswith(open_fence):
+            open_fence = None
 
         if title is None:
             if line.strip():
@@ -509,6 +525,43 @@ def split_step_sections(body: str) -> tuple[tuple[str, str], ...]:
 
     sections.append((title, "\n".join(body_lines).strip()))
     return tuple(sections)
+@
+
+Let's verify that step splitting ignores headings inside fenced examples,
+including examples that use a longer outer fence around a shorter inner
+one:
+
+<<test functions>>=
+def test_load_tutorial_file_ignores_step_headings_inside_code_fences(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Add a contains match\n\n"
+        "Keep the same tutorial and add a metadata fence:\n\n"
+        "````md\n"
+        "# Say hello\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - echo hello\n"
+        "```\n\n"
+        "Run `echo hello`.\n"
+        "````\n\n"
+        "# Load the tutorial from disk\n\n"
+        "Run `tutorial list --tutorial-path my-tutorials`.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert [step.title for step in tutorial.steps] == [
+        "Add a contains match",
+        "Load the tutorial from disk",
+    ]
+    assert "# Say hello" in tutorial.steps[0].instructions
+    assert "Run `echo hello`." in tutorial.steps[0].instructions
 @
 
 
