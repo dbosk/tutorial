@@ -20,6 +20,18 @@ test: compile
 doc/tutorial.pdf:
 	${MAKE} -C $(dir $@) $(notdir $@)
 
+.PHONY: publish
+publish: publish-pypi publish-github
+
+.PHONY: publish-pypi
+publish-pypi: compile
+	poetry publish
+
+.PHONY: publish-github
+publish-github: doc/tutorial.pdf
+	git push
+	gh release create -t v${version} v${version} doc/tutorial.pdf
+
 
 .PHONY: clean
 clean:
