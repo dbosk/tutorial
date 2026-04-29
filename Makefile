@@ -4,6 +4,7 @@ SUBDIR+=		src/tutorial
 SUBDIR+=		tests
 SUBDIR+=		doc
 
+version=$(shell sed -n 's/^ *version *= *\"\([^\"]\+\)\"/\1/p' pyproject.toml)
 
 .PHONY: all
 all: compile doc/tutorial.pdf test
