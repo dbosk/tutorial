@@ -40,7 +40,7 @@ test: all compile
 
 .PHONY: compile
 compile:
-	$(MAKE) -C ../src/tutorial all
+	$(MAKE) -C ../src/pytorial all
 
 .PHONY: clean
 clean:

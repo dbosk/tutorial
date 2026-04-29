@@ -1,7 +1,7 @@
 # Contributing to `tutorial`
 
 The project is organised as a literate-programming codebase. Committed
-sources live in `src/tutorial/*.nw`; `make` tangles them into the Python
+sources live in `src/pytorial/*.nw`; `make` tangles them into the Python
 modules used at runtime and weaves them into LaTeX/PDF documentation.
 
 ## First-time setup
@@ -30,8 +30,8 @@ shown in [`README.md`](README.md).
 
 ## Repo layout
 
-- `src/tutorial/`: literate source files and generated package modules
-- `src/tutorial/tutorials/`: packaged built-in Markdown tutorials
+- `src/pytorial/`: literate source files and generated package modules
+- `src/pytorial/tutorials/`: packaged built-in Markdown tutorials
 - `tutorials/`: repo-local example Markdown tutorials with YAML front matter
 - `tests/`: tangled test files generated from the literate sources
 - `doc/`: woven project documentation

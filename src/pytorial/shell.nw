@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from tutorial.shell import *
+from pytorial.shell import *
 
 <<test functions>>
 @
@@ -752,7 +752,7 @@ def test_relay_interactive_shell_stops_after_process_exit_and_pty_eof(
 
     monkeypatch.setattr(select, "select", fake_select)
     monkeypatch.setattr(
-        "tutorial.shell.read_pty_output",
+        "pytorial.shell.read_pty_output",
         lambda master_fd: None,
     )
 

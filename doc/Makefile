@@ -5,16 +5,16 @@ all: tutorial.pdf
 
 weave: tutorial.tex
 
-../src/tutorial/tutorial.tex: ../src/tutorial/tutorial.nw
-../src/tutorial/catalog.tex: ../src/tutorial/catalog.nw
-../src/tutorial/model.tex: ../src/tutorial/model.nw
-../src/tutorial/state.tex: ../src/tutorial/state.nw
-../src/tutorial/shell.tex: ../src/tutorial/shell.nw
-../src/tutorial/run.tex: ../src/tutorial/run.nw
-../src/tutorial/cli.tex: ../src/tutorial/cli.nw
-../src/tutorial/tutorials/using-tutorials.tex: ../src/tutorial/tutorials/using-tutorials.nw
-../src/tutorial/tutorials/writing-tutorials.tex: ../src/tutorial/tutorials/writing-tutorials.nw
-../src/tutorial/tutorials/shell-basics.tex: ../src/tutorial/tutorials/shell-basics.nw
+../src/pytorial/tutorial.tex: ../src/pytorial/tutorial.nw
+../src/pytorial/catalog.tex: ../src/pytorial/catalog.nw
+../src/pytorial/model.tex: ../src/pytorial/model.nw
+../src/pytorial/state.tex: ../src/pytorial/state.nw
+../src/pytorial/shell.tex: ../src/pytorial/shell.nw
+../src/pytorial/run.tex: ../src/pytorial/run.nw
+../src/pytorial/cli.tex: ../src/pytorial/cli.nw
+../src/pytorial/tutorials/using-tutorials.tex: ../src/pytorial/tutorials/using-tutorials.nw
+../src/pytorial/tutorials/writing-tutorials.tex: ../src/pytorial/tutorials/writing-tutorials.nw
+../src/pytorial/tutorials/shell-basics.tex: ../src/pytorial/tutorials/shell-basics.nw
 
 %.tex: %.nw
 	${MAKE} -C $(dir $@) $(notdir $@)
@@ -23,16 +23,16 @@ weave: tutorial.tex
 	${MAKE} -C $(dir $@) $(notdir $@)
 
 tutorial.pdf: tutorial.tex
-tutorial.pdf: ../src/tutorial/tutorial.tex
-tutorial.pdf: ../src/tutorial/catalog.tex
-tutorial.pdf: ../src/tutorial/model.tex
-tutorial.pdf: ../src/tutorial/state.tex
-tutorial.pdf: ../src/tutorial/shell.tex
-tutorial.pdf: ../src/tutorial/run.tex
-tutorial.pdf: ../src/tutorial/cli.tex
-tutorial.pdf: ../src/tutorial/tutorials/using-tutorials.tex
-tutorial.pdf: ../src/tutorial/tutorials/writing-tutorials.tex
-tutorial.pdf: ../src/tutorial/tutorials/shell-basics.tex
+tutorial.pdf: ../src/pytorial/tutorial.tex
+tutorial.pdf: ../src/pytorial/catalog.tex
+tutorial.pdf: ../src/pytorial/model.tex
+tutorial.pdf: ../src/pytorial/state.tex
+tutorial.pdf: ../src/pytorial/shell.tex
+tutorial.pdf: ../src/pytorial/run.tex
+tutorial.pdf: ../src/pytorial/cli.tex
+tutorial.pdf: ../src/pytorial/tutorials/using-tutorials.tex
+tutorial.pdf: ../src/pytorial/tutorials/writing-tutorials.tex
+tutorial.pdf: ../src/pytorial/tutorials/shell-basics.tex
 tutorial.pdf: abstract.tex preamble.tex
 
 clean:

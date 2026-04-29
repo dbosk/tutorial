@@ -1,7 +1,7 @@
 \chapter{Package Overview}
 \label{tutorial-overview}
 
-The [[tutorial]] package is organised around one practical constraint:
+The [[pytorial]] package is organised around one practical constraint:
 the first version should make shell-based tutorials possible without a
 full terminal UI framework.  We therefore keep the package surface
 small and expose a runner, a persistent state store, the file-backed
@@ -14,7 +14,7 @@ lives in the later chapters.
 \section{Code overview}
 
 <<[[__init__.py]]>>=
-"""Public package surface for ``tutorial``."""
+"""Public package surface for ``pytorial``."""
 
 <<imports>>
 
@@ -43,7 +43,7 @@ __all__ = [
 <<test [[tutorial.py]]>>=
 """Tests for the public package exports."""
 
-from tutorial import *
+from pytorial import *
 
 <<test functions>>
 @
@@ -56,24 +56,24 @@ Users should not need to remember where the CLI helpers or the model
 objects live internally.
 
 <<imports>>=
-from tutorial.cli import add_argparse_subcommand
-from tutorial.cli import add_typer_subcommand
-from tutorial.cli import app
-from tutorial.cli import create_app
-from tutorial.catalog import TutorialCatalog
-from tutorial.catalog import get_tutorial
-from tutorial.catalog import get_tutorials
-from tutorial.model import StepTranscript
-from tutorial.model import TextMatch
-from tutorial.model import Tutorial
-from tutorial.model import TutorialRun
-from tutorial.model import TutorialStep
-from tutorial.run import RunResult
-from tutorial.run import TutorialRunner
-from tutorial.shell import run_interactive_shell
-from tutorial.shell import run_scripted_shell
-from tutorial.state import ProgressState
-from tutorial.state import StateStore
+from pytorial.cli import add_argparse_subcommand
+from pytorial.cli import add_typer_subcommand
+from pytorial.cli import app
+from pytorial.cli import create_app
+from pytorial.catalog import TutorialCatalog
+from pytorial.catalog import get_tutorial
+from pytorial.catalog import get_tutorials
+from pytorial.model import StepTranscript
+from pytorial.model import TextMatch
+from pytorial.model import Tutorial
+from pytorial.model import TutorialRun
+from pytorial.model import TutorialStep
+from pytorial.run import RunResult
+from pytorial.run import TutorialRunner
+from pytorial.shell import run_interactive_shell
+from pytorial.shell import run_scripted_shell
+from pytorial.state import ProgressState
+from pytorial.state import StateStore
 @
 
 Let's verify that the package exports the file-backed lookup helpers and

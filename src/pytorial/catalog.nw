@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tutorial.catalog import *
+from pytorial.catalog import *
 
 <<test functions>>
 @
@@ -56,9 +56,9 @@ from pathlib import Path
 
 import yaml
 
-from tutorial.model import TextMatch
-from tutorial.model import Tutorial
-from tutorial.model import TutorialStep
+from pytorial.model import TextMatch
+from pytorial.model import Tutorial
+from pytorial.model import TutorialStep
 @
 
 
@@ -237,7 +237,7 @@ def resolve_tutorial_files(
 
 The standalone command should work without any extra setup, so the
 package also ships a small set of Markdown tutorials.  We keep them as
-ordinary files under [[src/tutorial/tutorials/]] rather than embedding
+ordinary files under [[src/pytorial/tutorials/]] rather than embedding
 them as opaque resources.  That keeps their paths stable for resume logic
 and for review output that wants to remember where a tutorial came from.
 

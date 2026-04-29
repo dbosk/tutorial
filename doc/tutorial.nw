@@ -38,19 +38,19 @@ the learner's point of view: how a tutorial is discovered, run,
 authored, and reviewed.  The implementation in \cref{part:implementation}
 is then explained against this user-facing baseline.
 
-\input{../src/tutorial/tutorials/using-tutorials.tex}
-\input{../src/tutorial/tutorials/writing-tutorials.tex}
-\input{../src/tutorial/tutorials/shell-basics.tex}
+\input{../src/pytorial/tutorials/using-tutorials.tex}
+\input{../src/pytorial/tutorials/writing-tutorials.tex}
+\input{../src/pytorial/tutorials/shell-basics.tex}
 
 \part{Implementation}
 \label{part:implementation}
 
-\input{../src/tutorial/tutorial.tex}
-\input{../src/tutorial/catalog.tex}
-\input{../src/tutorial/model.tex}
-\input{../src/tutorial/state.tex}
-\input{../src/tutorial/shell.tex}
-\input{../src/tutorial/run.tex}
-\input{../src/tutorial/cli.tex}
+\input{../src/pytorial/tutorial.tex}
+\input{../src/pytorial/catalog.tex}
+\input{../src/pytorial/model.tex}
+\input{../src/pytorial/state.tex}
+\input{../src/pytorial/shell.tex}
+\input{../src/pytorial/run.tex}
+\input{../src/pytorial/cli.tex}
 
 \end{document}

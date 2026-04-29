@@ -5,9 +5,9 @@ A Python library for interactive command-line tutorials.
 ## Install
 
 ```
-pipx install tutorial
+pipx install pytorial
 # or
-uv tool install tutorial
+uv tool install pytorial
 ```
 
 To run from a clone instead of an installed copy, see
@@ -136,7 +136,7 @@ tutorial run --tutorial-path some/dir <id>
 
 The package can be mounted as a subcommand inside another Typer or
 argparse application via `add_typer_subcommand` and
-`add_argparse_subcommand` in `src/tutorial/cli.py`. Embedded hosts
+`add_argparse_subcommand` in `src/pytorial/cli.py`. Embedded hosts
 prepend the `using-tutorials` lesson before host-specific tutorials, do
 not load the user's installed tutorial directory, and hide the
 standalone-only `install` command.

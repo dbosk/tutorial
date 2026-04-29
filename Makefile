@@ -1,6 +1,6 @@
 SUBDIR_GOALS=	all clean distclean
 
-SUBDIR+=		src/tutorial
+SUBDIR+=		src/pytorial
 SUBDIR+=		tests
 SUBDIR+=		doc
 
@@ -11,7 +11,7 @@ all: compile doc/tutorial.pdf test
 
 .PHONY: compile
 compile:
-	${MAKE} -C src/tutorial all
+	${MAKE} -C src/pytorial all
 	poetry build
 
 .PHONY: test
@@ -39,7 +39,7 @@ clean:
 
 .PHONY: distclean
 distclean:
-	${RM} -R build dist tutorial.egg-info src/tutorial.egg-info
+	${RM} -R build dist tutorial.egg-info pytorial.egg-info src/tutorial.egg-info src/pytorial.egg-info
 
 
 INCLUDE_MAKEFILES=makefiles
