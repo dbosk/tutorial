@@ -1,0 +1,212 @@
+\chapter{Tutorial: Shell Basics}
+\label{tutorial-shell-basics}
+
+The [[shell-basics]] tutorial is the smallest end-to-end workspace
+walk-through.  It exists for two reasons: it exercises the shell and
+editor backends without any question steps, and the [[using-tutorials]]
+tutorial drives it as a sub-tutorial to demonstrate the
+\enquote{tutorial inside a tutorial} composition.  Step ordering follows
+the variation-theory \enquote{whole, parts, whole} pattern: we open with
+the workspace as a single concept, vary one aspect at a time across the
+middle steps, and close with a fused example that re-applies the pattern
+under new names.
+
+\section{Tutorial source}
+
+The whole tutorial file is one tangled root chunk.  We split each step
+into its own named sub-chunk so the prose between them can explain that
+step's role without breaking up the markdown output.
+
+<<[[shell-basics.md]]>>=
+---
+id: shell-basics
+title: Shell Basics
+summary: Use directories, files, paths, and an editor in the workspace.
+---
+
+<<inspect workspace step>>
+
+<<create directory step>>
+
+<<create file in directory step>>
+
+<<edit file step>>
+
+<<review directory and file step>>
+
+<<generalise pattern step>>
+@
+
+\section{Step 1: Inspect the workspace}
+
+The first step establishes the workspace as the invariant the rest of
+the tutorial varies against.  Before a learner can notice that
+[[mkdir notes]] changes the workspace, they need a baseline view of it.
+The metadata fence is a plain [[required_patterns]] block with two bare
+[[contains]] strings; this is the simplest possible step shape and
+matches what authors should reach for by default.  The hint reminds
+learners that the shell starts already inside the tutorial-owned
+directory, so [[pwd]] is meaningful.
+
+<<inspect workspace step>>=
+# Inspect the workspace
+
+```tutorial-step
+required_patterns:
+  - pwd
+  - ls
+hint: The shell starts in the tutorial workspace.
+```
+
+Run `pwd` and `ls`.
+
+Each tutorial run gets its own workspace. These commands show where your
+files for this run will live.
+@
+
+\section{Step 2: Create a directory}
+
+This step introduces variation by changing exactly one aspect of the
+workspace: a directory now exists.  The required patterns repeat [[ls]]
+from the previous step intentionally, so learners see the same listing
+before and after [[mkdir]] and notice [[notes]] as the only difference.
+Pairing [[mkdir]] with [[ls]] in [[required_patterns]] also forces the
+learner to verify the change rather than just issuing the create
+command.
+
+<<create directory step>>=
+# Create a directory
+
+```tutorial-step
+required_patterns:
+  - mkdir notes
+  - ls
+  - notes
+hint: Create a directory called `notes`, then list the workspace again.
+```
+
+Create a directory named `notes`, then run `ls` again.
+
+The contrast here is between the workspace before and after one directory
+is added.
+@
+
+\section{Step 3: Create a file in that directory}
+
+The path stem [[notes]] stays invariant while the leaf changes from a
+directory to a file inside it.  Holding the path constant makes the
+single critical change --- directory versus file at a path --- visible
+in isolation.  We use [[ls notes]] rather than [[ls]] so the learner
+sees the directory's contents and can identify the new file
+independently of the workspace listing they already practised in
+step~2.
+
+<<create file in directory step>>=
+# Create a file in that directory
+
+```tutorial-step
+required_patterns:
+  - touch notes/todo.md
+  - ls notes
+  - todo.md
+hint: Use `touch` with the nested path `notes/todo.md`.
+```
+
+Create `notes/todo.md`, then run `ls notes`.
+
+Keep the same path stem `notes` while changing only what you create:
+first a directory, then a file inside it.
+@
+
+\section{Step 4: Edit the file}
+
+This is the first non-shell backend in the tutorial.  The path
+[[notes/todo.md]] stays invariant; the only thing that changes is the
+interaction kind.  [[edit_file]] selects the editor backend and is
+mutually exclusive with [[kind]] (a parse-time error if both are
+present), which is why this step uses neither [[kind]] nor a shell
+hint.  The two required strings are deliberately short fragments so
+learners can decide their own line wrapping inside the editor without
+the validator becoming brittle.
+
+<<edit file step>>=
+# Edit the file
+
+```tutorial-step
+edit_file: notes/todo.md
+required_patterns:
+  - tutorial authoring
+  - remember this path
+```
+
+Open `notes/todo.md` in your editor and add two short lines:
+
+- `tutorial authoring`
+- `remember this path`
+
+Save the file and quit the editor.
+
+The path stays the same, but the interaction changes from shell commands
+to an editor-backed step.
+@
+
+\section{Step 5: Review the directory and the file}
+
+After three steps that mutate the workspace, this step contrasts two
+related read-only views: [[ls notes]] enumerates what exists, while
+[[cat notes/todo.md]] shows one file's contents.  This is variation
+theory's separation pattern: holding the workspace state invariant
+across the two commands lets the learner notice what each command tells
+them about the same data.  The required patterns include the
+characteristic output of each command ([[todo.md]] from the listing,
+[[tutorial authoring]] from the file) so the validator confirms the
+learner ran both rather than only one.
+
+<<review directory and file step>>=
+# Review the directory and the file
+
+```tutorial-step
+required_patterns:
+  - ls notes
+  - todo.md
+  - cat notes/todo.md
+  - tutorial authoring
+hint: First list the directory, then display the file.
+```
+
+Run `ls notes` and `cat notes/todo.md`.
+
+This contrasts two related views: listing a directory tells you which
+files exist, while `cat` shows what one file contains.
+@
+
+\section{Step 6: Generalise the pattern}
+
+The closing step is variation theory's fusion: same shape
+([[directory/file.md]]), new names ([[my-tutorials/demo.md]]).  Re-doing
+the create-directory-then-create-file dance under different names
+exercises the pattern as a pattern rather than as one specific path.
+This step also sets up [[writing-tutorials]], which expects a
+[[my-tutorials]] directory to exist and uses [[my-tutorials/greeting.md]]
+as its invariant path throughout.  Bridging the two tutorials at the
+filesystem level keeps the worked example concrete across the
+boundary.
+
+<<generalise pattern step>>=
+# Generalise the pattern for tutorial files
+
+```tutorial-step
+required_patterns:
+  - mkdir my-tutorials
+  - touch my-tutorials/demo.md
+  - ls my-tutorials
+  - demo.md
+hint: Repeat the same directory-and-file pattern with new names.
+```
+
+Create a directory named `my-tutorials`, create
+`my-tutorials/demo.md`, then run `ls my-tutorials`.
+
+Now the names vary, but the path pattern `directory/file.md` stays the
+same. That is the pattern the tutorial-authoring lesson will build on.
+@

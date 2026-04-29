@@ -12,6 +12,9 @@ weave: tutorial.tex
 ../src/tutorial/shell.tex: ../src/tutorial/shell.nw
 ../src/tutorial/run.tex: ../src/tutorial/run.nw
 ../src/tutorial/cli.tex: ../src/tutorial/cli.nw
+../src/tutorial/tutorials/using-tutorials.tex: ../src/tutorial/tutorials/using-tutorials.nw
+../src/tutorial/tutorials/writing-tutorials.tex: ../src/tutorial/tutorials/writing-tutorials.nw
+../src/tutorial/tutorials/shell-basics.tex: ../src/tutorial/tutorials/shell-basics.nw
 
 %.tex: %.nw
 	${MAKE} -C $(dir $@) $(notdir $@)
@@ -27,6 +30,9 @@ tutorial.pdf: ../src/tutorial/state.tex
 tutorial.pdf: ../src/tutorial/shell.tex
 tutorial.pdf: ../src/tutorial/run.tex
 tutorial.pdf: ../src/tutorial/cli.tex
+tutorial.pdf: ../src/tutorial/tutorials/using-tutorials.tex
+tutorial.pdf: ../src/tutorial/tutorials/writing-tutorials.tex
+tutorial.pdf: ../src/tutorial/tutorials/shell-basics.tex
 tutorial.pdf: abstract.tex preamble.tex
 
 clean:

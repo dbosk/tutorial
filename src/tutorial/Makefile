@@ -10,6 +10,7 @@ MODULES+=	cli.py cli.tex
 
 .PHONY: all
 all: ${MODULES}
+	${MAKE} -C tutorials all
 
 __init__.py: tutorial.nw
 	${NOTANGLE.py}
@@ -25,10 +26,12 @@ cli.py: cli.nw
 .PHONY: clean
 clean:
 	${RM} ${MODULES}
+	${MAKE} -C tutorials clean
 
 .PHONY: distclean
 distclean:
 	${RM} -Rf __pycache__
+	${MAKE} -C tutorials distclean
 
 
 INCLUDE_MAKEFILES=../../makefiles

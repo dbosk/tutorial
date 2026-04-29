@@ -1,5 +1,5 @@
 [project]
-name = "interactive-tutorial"
+name = "pytorial"
 version = "0.1"
 description = "Interactive command-line tutorials with PTY-backed steps"
 license = "MIT"
@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 tutorial = "tutorial.cli:app"
+pytorial = "tutorial.cli:app"
 
 [project.urls]
 repository = "https://github.com/dbosk/tutorial"
@@ -44,6 +45,10 @@ exclude = [
   "src/tutorial/*.nw",
   "src/tutorial/*.tex",
   "src/tutorial/ltxobj",
+  "src/tutorial/tutorials/Makefile",
+  "src/tutorial/tutorials/*.nw",
+  "src/tutorial/tutorials/*.tex",
+  "src/tutorial/tutorials/ltxobj",
 ]
 
 [tool.black]
