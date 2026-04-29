@@ -1,0 +1,423 @@
+\chapter{Tutorial: Using Tutorials}
+\label{tutorial-using-tutorials}
+
+[[using-tutorials]] is the entry point for a learner picking up the
+package for the first time.  It exercises every user-facing CLI verb
+([[list]], [[run]], [[review]], [[install]]) and every step backend
+(shell, editor, [[input]], [[single_select]], [[multi_select]]) in one
+linear walk-through, so a learner who finishes it has touched the whole
+public surface at least once.
+
+The internal arc is roughly:
+\begin{enumerate}
+\item discover what is installed (steps 1--3 cover [[list]] and [[run]]
+  with shell steps),
+\item author content into the workspace (step 4 introduces the editor
+  backend),
+\item answer questions of increasing structure (steps 5--7 cover the
+  three [[kind]] values),
+\item inspect what was recorded (steps 8--9 cover [[review]] with and
+  without [[--step]]), and
+\item meet the one verb we have not exercised yet (step 10 covers
+  [[install]] as a question rather than as a real install).
+\end{enumerate}
+This shape is variation theory's separation pattern at the tutorial
+level: the workflow stays invariant across the steps, while one aspect
+of the CLI rotates through being practised.
+
+\section{Tutorial source}
+
+The whole tutorial file is one tangled root chunk.  Each step lives in
+its own named sub-chunk so the prose between them can describe that
+step's role without breaking the markdown output.
+
+<<[[using-tutorials.md]]>>=
+---
+id: using-tutorials
+title: Using Tutorials
+summary: Learn how list, run, question prompts, and review fit together.
+---
+
+<<list step>>
+
+<<start another tutorial step>>
+
+<<retry shell step>>
+
+<<capture workflow step>>
+
+<<input question step>>
+
+<<single select step>>
+
+<<multi select step>>
+
+<<review run step>>
+
+<<review one step step>>
+
+<<install step>>
+@
+
+\section{Step 1: List the available tutorials}
+
+We open with [[tutorial list]] because it is the only command a learner
+can run before anything else exists --- it has no required arguments
+and produces output even on a fresh install.  The required patterns
+include the names of all three built-ins; this turns the validator into
+a discoverability check (\enquote{did the listing actually find every
+shipped tutorial?}) rather than just an output presence check.  The
+prose mentions that the same command emits a TSV when its stdout is not
+a terminal: this is the only place in the tutorial corpus where that
+detail surfaces, and it matters for users who script around the CLI.
+
+<<list step>>=
+# List the available tutorials
+
+```tutorial-step
+required_patterns:
+  - tutorial list
+  - using-tutorials
+  - shell-basics
+  - writing-tutorials
+hint: Run `tutorial list`.
+```
+
+Run `tutorial list`.
+
+In a terminal, `tutorial list` renders a readable table. When the same
+command is piped into a script, it switches to tab-separated rows.
+
+Its main job is to show which tutorials are available and how much
+progress is already saved for each one.
+@
+
+\section{Step 2: Start another tutorial}
+
+This step demonstrates the runner running \emph{another} tutorial from
+inside the current one.  Two design decisions show up in the metadata:
+
+\begin{description}
+\item[The [[--restart]] flag] is mandatory here so the step is
+  idempotent.  Without it, re-running the lesson after completing
+  [[shell-basics]] once would resume the saved progress and not show
+  the unfinished-step output the learner is meant to see.  We also
+  document that [[--restart]] discards \emph{all} saved transcripts
+  for the target tutorial, not just one step --- a non-obvious detail
+  worth surfacing before a learner uses it casually.
+\item[The required pattern [[shell-basics $]] ] anchors on the nested
+  shell prompt.  Each tutorial relabels its prompt with its own
+  [[id]], which is how a learner can tell which tutorial owns the
+  current shell.  Validating against the labelled prompt is more
+  reliable than validating against shell output, because the prompt
+  is emitted before any command runs.
+\end{description}
+
+The third pattern (\enquote{Step not complete yet: \ldots}) confirms
+that the learner exited the nested shell early on purpose.  The
+instructions explicitly tell them to do this: leaving a step in a
+deliberately failing state lets the next step demonstrate the retry
+workflow.
+
+<<start another tutorial step>>=
+# Start another tutorial
+
+```tutorial-step
+required_patterns:
+  - tutorial run --restart shell-basics
+  - "shell-basics $"
+  - "Step not complete yet: Inspect the workspace"
+hint: Start `shell-basics`, then leave its first shell with `exit`.
+```
+
+Run `tutorial run --restart shell-basics`.
+
+The `run` command starts or resumes saved work. We use `--restart` here so
+this step behaves the same way even if you have already finished
+`shell-basics` before. `--restart` discards every saved transcript for that
+tutorial, not just the step you are about to revisit.
+
+Because this lesson is already running, the nested shell prompt changes to
+`shell-basics $ ` so you can tell which tutorial owns the current shell.
+
+For this step:
+
+1. Run `tutorial run --restart shell-basics`.
+2. When the nested shell opens, type `exit`.
+3. After the nested command reports that the step is not complete yet,
+   exit this outer shell too.
+@
+
+\section{Step 3: Retry a shell step}
+
+Step~2 left [[shell-basics]] in a failing state on purpose so this step
+can introduce \enquote{try again}.  The pedagogical move is two-pass:
+the learner runs only [[pwd]], fails, then runs both [[pwd]] and [[ls]]
+on the second attempt.  Validating only the second attempt
+([[required_patterns]] lists both commands) demonstrates the
+\enquote{only the latest recorded attempt counts} rule without
+spelling it out as a separate concept --- the learner experiences it
+directly.  Anchoring on the [[using-tutorials \$]] prompt also
+contrasts with step~2's [[shell-basics \$]] anchor, so the two
+prompts together make the prompt-relabelling rule generalise rather
+than appear once.
+
+<<retry shell step>>=
+# Retry a shell step
+
+```tutorial-step
+required_patterns:
+  - "using-tutorials $"
+  - pwd
+  - ls
+hint: First exit after `pwd`, then choose `try again` and run both commands.
+```
+
+Now return to this tutorial's own shell.
+
+To feel how step validation works, try this step in two rounds:
+
+1. First run only `pwd`, then exit the shell.
+2. The tutorial should say the step is not complete yet.
+3. Choose `try again`, run both `pwd` and `ls`, then exit again.
+
+Only the latest recorded attempt counts. If you leave now and come back
+later, `tutorial run using-tutorials` resumes from the first unfinished
+step unless you restart it.
+@
+
+\section{Step 4: Capture the workflow in a file}
+
+Switching backends here without changing the underlying validation
+idea is variation theory's contrast pattern: same authoring shape
+([[required_patterns]] over the recorded artefact), different artefact
+(an editor-saved file rather than a shell transcript).  The three
+required patterns are exactly the three lines the learner is asked to
+type, which doubles as a checklist they can self-assess against
+before saving.  Putting the editor step here also breaks up the
+sequence of shell steps, which would otherwise risk a learner
+mistakenly inferring that the runner is shell-only.
+
+<<capture workflow step>>=
+# Capture the workflow in a file
+
+```tutorial-step
+edit_file: tutorial-commands.txt
+required_patterns:
+  - tutorial list discovers tutorials
+  - tutorial run starts or resumes one
+  - tutorial review shows saved transcripts
+```
+
+Open `tutorial-commands.txt` in your editor and add these three lines:
+
+- `tutorial list discovers tutorials`
+- `tutorial run starts or resumes one`
+- `tutorial review shows saved transcripts`
+
+Save the file and quit the editor.
+
+This contrasts a shell step with an editor step while keeping the same
+validation idea: the tutorial only checks what was recorded after you
+finish the step.
+@
+
+\section{Step 5: Answer a one-line question}
+
+This is the smallest question step possible: [[kind: input]] with a
+single regex answer.  The regex anchors on whitespace
+([[(?:\s+)?\$]]) so trailing spaces from terminal autocomplete do not
+fail the match.  We chose regex rather than a [[contains]] string for
+this introduction so the learner sees the more powerful answer mode
+first; the next two steps then \emph{contrast} with bare-string
+answers, which makes the difference between answer modes legible
+through variation rather than through direct explanation.
+
+<<input question step>>=
+# Answer a one-line question
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: ^tutorial\s+review\s+using-tutorials(?:\s+)?$
+hint: Type the full review command for this tutorial.
+```
+
+Type the exact command that reviews this tutorial:
+`tutorial review using-tutorials`.
+
+This is the smallest question step. The tutorial asks for one line of
+text, records it immediately, and validates it without opening a shell.
+@
+
+\section{Step 6: Pick the command that starts work}
+
+[[single_select]] is the simplest of the multiple-choice kinds.
+Crucially, the [[answers]] list contains the literal option text, not
+an index, so authoring stays robust under option re-ordering.  The
+prose highlights that the runner accepts both the option number
+\emph{and} the option text from the learner --- this is a
+learner-facing convenience, but the authored answer always uses the
+text form so authors do not have to track positions.
+
+<<single select step>>=
+# Pick the command that starts work
+
+```tutorial-step
+kind: single_select
+options:
+  - tutorial list
+  - tutorial run
+  - tutorial review
+answers:
+  - tutorial run
+```
+
+Choose the command that starts or resumes one tutorial.
+
+Single-select questions show numbered options. You can answer with the
+number or with the full option text.
+@
+
+\section{Step 7: Pick every read-only tutorial command}
+
+[[multi_select]] generalises [[single_select]] to multiple correct
+options.  We deliberately include [[tutorial install]] as the
+distractor: a learner who has not internalised \enquote{which commands
+read versus write?} might pick it because it shares the [[tutorial]]
+prefix.  The framing question (\enquote{commands that only read}) is
+the conceptual axis the step is testing, and the [[hint]] re-states
+the axis explicitly because the option labels alone do not signal
+read-versus-write semantics.
+
+<<multi select step>>=
+# Pick every read-only tutorial command
+
+```tutorial-step
+kind: multi_select
+options:
+  - tutorial list
+  - tutorial run
+  - tutorial review
+  - tutorial install
+answers:
+  - tutorial list
+  - tutorial review
+hint: Choose the commands that only read tutorial definitions or saved state.
+```
+
+Choose every tutorial command here that reads existing information without
+starting a run or installing anything.
+
+Multi-select questions also use literal option text. The learner may pick
+the correct options in any order, but the tutorial still stores the
+authored answer list.
+@
+
+\section{Step 8: Review the saved run}
+
+This step is the first time [[tutorial review]] appears, and it does
+double duty: the learner runs the command, and the [[required_patterns]]
+list verifies that the review output covers earlier steps the learner
+has already finished.  We list specific step headings (\enquote{Step 1:
+\ldots}, \enquote{Step 4: \ldots}, \enquote{Step 7: \ldots}) rather
+than every step, because the review command shows only steps recorded
+\emph{before} the current one.  Picking widely separated indices
+exercises the review's coverage without being brittle to the ordering
+of recently completed steps.  The trailing prose summarises the
+workflow seen so far, which is the variation-theory \emph{fusion} move:
+after exposing the parts (list, run, question kinds), we step back and
+fuse them into a single mental model.
+
+<<review run step>>=
+# Review the saved run
+
+```tutorial-step
+required_patterns:
+  - tutorial review using-tutorials
+  - Using Tutorials
+  - "Step 1: List the available tutorials"
+  - "Step 4: Capture the workflow in a file"
+  - "Step 7: Pick every read-only tutorial command"
+  - tutorial review shows saved transcripts
+hint: Review `using-tutorials` from inside this shell.
+```
+
+Run `tutorial review using-tutorials`.
+
+Review reads the saved transcripts for the current run. Because this shell
+session is still in progress, the review output can show the earlier saved
+steps, but it cannot show this step until after you exit the shell and the
+step is recorded.
+
+At this point you have seen the main run-and-review workflow end to end:
+
+- `tutorial list` discovers what you can run
+- `tutorial run` starts or resumes one tutorial at a time
+- question steps can ask for input, one choice, or several choices
+- `tutorial review` inspects the saved record afterwards
+@
+
+\section{Step 9: Inspect one step of the saved run}
+
+The narrowing flag [[--step N]] is taught immediately after the
+unfiltered review so the contrast is direct.  The required patterns
+verify that exactly one step's heading appears in the output, which is
+how a learner sees that the flag actually narrows the view rather than
+just highlighting a step within the full review.  We also mention
+[[--run-id]] in the prose --- not as a pattern --- because that flag
+selects an older run, and exercising it would require the learner to
+have an older run to point at, which is out of scope for a linear
+tutorial.
+
+<<review one step step>>=
+# Inspect one step of the saved run
+
+```tutorial-step
+required_patterns:
+  - tutorial review using-tutorials --step 1
+  - "Step 1: List the available tutorials"
+hint: Review only step 1 from inside this shell.
+```
+
+Run `tutorial review using-tutorials --step 1`.
+
+`--step N` narrows the review to one 1-indexed step instead of the whole
+run. Review normally shows the latest saved run for that tutorial; use
+`--run-id <id>` to pick an older one instead. `tutorial review --help`
+shows the full form.
+@
+
+\section{Step 10: Install a tutorial from a file or URL}
+
+[[install]] is the only verb a linear tutorial cannot exercise for
+real --- running it would mutate the user's installed tutorial
+directory and pollute later [[tutorial list]] output, including
+output the same tutorial validates against.  The compromise is to
+make the step a [[kind: input]] question whose regex accepts any
+[[tutorial install <source>]] form, with optional [[--force]].  The
+learner types the command shape without it being run.  This still
+teaches the verb, the argument shape, and the [[--force]] override
+semantics, while keeping the rest of the tutorial reproducible.
+
+<<install step>>=
+# Install a tutorial from a file or URL
+
+```tutorial-step
+kind: input
+answers:
+  - mode: regex
+    pattern: ^tutorial\s+install\s+\S+(?:\s+--force)?\s*$
+hint: Type an install command with a file path or URL.
+```
+
+Type a command such as `tutorial install ./lesson.md` or
+`tutorial install https://example.com/lesson.md --force`.
+
+`tutorial install <source>` copies a tutorial Markdown file into your
+installed tutorial directory so it appears in `tutorial list` alongside the
+built-ins. Add `--force` to overwrite an installed tutorial with the same
+`id`. This question step only records your answer, so you can practice the
+command safely without installing anything.
+@

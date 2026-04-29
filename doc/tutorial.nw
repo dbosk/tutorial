@@ -27,6 +27,24 @@
 
 \mainmatter
 
+\part{Using the package}
+\label{part:using}
+
+The chapters in this part are the three built-in tutorials shipped with
+the package, written as literate sources so each step's pedagogical role
+is visible alongside its definition.  They appear before the
+implementation chapters because they describe what the runner does from
+the learner's point of view: how a tutorial is discovered, run,
+authored, and reviewed.  The implementation in \cref{part:implementation}
+is then explained against this user-facing baseline.
+
+\input{../src/tutorial/tutorials/using-tutorials.tex}
+\input{../src/tutorial/tutorials/writing-tutorials.tex}
+\input{../src/tutorial/tutorials/shell-basics.tex}
+
+\part{Implementation}
+\label{part:implementation}
+
 \input{../src/tutorial/tutorial.tex}
 \input{../src/tutorial/catalog.tex}
 \input{../src/tutorial/model.tex}
