@@ -37,7 +37,7 @@ repository = "https://github.com/dbosk/tutorial"
 packages = [{include = "pytorial", from = "src"}]
 include = [
   {path = "src/**/*.py", format = "wheel"},
-  {path = "src/pytorial/tutorials/*.md"},
+  {path = "src/pytorial/tutorials/*.md", format = ["sdist", "wheel"]},
 ]
 exclude = [
   "src/pytorial/.gitignore",
