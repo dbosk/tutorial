@@ -15,7 +15,7 @@ layer and only varies the argument plumbing.
 \section{Code overview}
 
 <<[[cli.py]]>>=
-"""Command-line interface and embedding helpers for ``tutorial``."""
+"""Command-line interface and embedding helpers for ``pytorial``."""
 
 <<imports>>
 
@@ -36,18 +36,18 @@ from io import StringIO
 
 import pytest
 
-from tutorial.catalog import TutorialCatalog
+from pytorial.catalog import TutorialCatalog
 from rich.console import Console
 from typer.testing import CliRunner
 
-from tutorial.cli import *
-from tutorial.model import StepTranscript
-from tutorial.model import TextMatch
-from tutorial.model import Tutorial
-from tutorial.model import TutorialStep
-from tutorial.shell import EditorResult
-from tutorial.shell import run_scripted_shell
-from tutorial.state import StateStore
+from pytorial.cli import *
+from pytorial.model import StepTranscript
+from pytorial.model import TextMatch
+from pytorial.model import Tutorial
+from pytorial.model import TutorialStep
+from pytorial.shell import EditorResult
+from pytorial.shell import run_scripted_shell
+from pytorial.state import StateStore
 
 <<test functions>>
 @
@@ -256,31 +256,31 @@ import urllib.parse
 import urllib.request
 
 import platformdirs
-from tutorial.catalog import TutorialCatalog
-from tutorial.catalog import builtin_tutorial_paths
-from tutorial.catalog import parse_tutorial_step_markdown
-from tutorial.catalog import parse_tutorial_text
-from tutorial.catalog import serialize_tutorial_step
-from tutorial.catalog import universal_tutorial_path
+from pytorial.catalog import TutorialCatalog
+from pytorial.catalog import builtin_tutorial_paths
+from pytorial.catalog import parse_tutorial_step_markdown
+from pytorial.catalog import parse_tutorial_text
+from pytorial.catalog import serialize_tutorial_step
+from pytorial.catalog import universal_tutorial_path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 import typer
 
-from tutorial.model import step_kind
-from tutorial.model import TutorialStep
-from tutorial.run import perform_step
-from tutorial.run import recorded_text
-from tutorial.run import RunResult
-from tutorial.run import TutorialRunner
-from tutorial.run import validate_step
-from tutorial.shell import EditorResult
-from tutorial.shell import run_editor
-from tutorial.shell import run_interactive_shell
-from tutorial.shell import ShellResult
-from tutorial.shell import utc_now
-from tutorial.state import ProgressState
-from tutorial.state import StateStore
+from pytorial.model import step_kind
+from pytorial.model import TutorialStep
+from pytorial.run import perform_step
+from pytorial.run import recorded_text
+from pytorial.run import RunResult
+from pytorial.run import TutorialRunner
+from pytorial.run import validate_step
+from pytorial.shell import EditorResult
+from pytorial.shell import run_editor
+from pytorial.shell import run_interactive_shell
+from pytorial.shell import ShellResult
+from pytorial.shell import utc_now
+from pytorial.state import ProgressState
+from pytorial.state import StateStore
 @
 
 
@@ -408,7 +408,7 @@ def test_standalone_tutorial_paths_use_only_builtins_when_user_dir_missing(
     monkeypatch,
     tmp_path,
 ):
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
 
     assert standalone_tutorial_paths() == builtin_tutorial_paths()
 
@@ -428,7 +428,7 @@ def test_standalone_tutorial_paths_append_user_dir_when_it_has_tutorials(
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tutorial_dir)
 
     assert standalone_tutorial_paths() == builtin_tutorial_paths() + (tutorial_dir,)
 
@@ -2065,7 +2065,7 @@ def test_install_tutorial_copies_local_markdown_into_user_dir(
         "Do it.\n"
     )
     install_dir = tmp_path / "installed"
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: install_dir)
 
     tutorial_id, installed_path = install_tutorial(str(source))
 
@@ -2089,7 +2089,7 @@ def test_install_tutorial_can_overwrite_with_force(monkeypatch, tmp_path):
     install_dir.mkdir()
     installed_path = install_dir / "installed-demo.md"
     installed_path.write_text("old")
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: install_dir)
 
     with pytest.raises(ValueError, match="Use --force"):
         install_tutorial(str(source))
@@ -2113,7 +2113,7 @@ def test_install_tutorial_can_overwrite_with_force(monkeypatch, tmp_path):
 
 def test_install_tutorial_can_install_from_url(monkeypatch, tmp_path):
     install_dir = tmp_path / "installed"
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: install_dir)
 
     class FakeHeaders:
         def get_content_charset(self):
@@ -2163,7 +2163,7 @@ def test_install_tutorial_rejects_builtin_tutorial_ids(monkeypatch, tmp_path):
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tmp_path / "user")
 
     with pytest.raises(ValueError, match="built in"):
         install_tutorial(str(source))
@@ -2595,7 +2595,7 @@ def test_standalone_app_lists_installed_user_tutorials(monkeypatch, tmp_path):
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tutorial_dir)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -2619,7 +2619,7 @@ def test_standalone_install_command_installs_local_tutorial(monkeypatch, tmp_pat
         "Do it.\n"
     )
     install_dir = tmp_path / "user"
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: install_dir)
 
     runner = CliRunner()
     result = runner.invoke(create_standalone_app(), ["install", str(source)])
@@ -2652,7 +2652,7 @@ def test_standalone_install_command_overwrites_with_force(monkeypatch, tmp_path)
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: install_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: install_dir)
 
     runner = CliRunner()
     result = runner.invoke(create_standalone_app(), ["install", str(source)])
@@ -2904,7 +2904,7 @@ def test_add_typer_subcommand_ignores_user_installed_tutorials(
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tutorial_dir)
 
     tutorial_path = write_demo_tutorial(tmp_path)
     parent = typer.Typer()
@@ -3067,7 +3067,7 @@ def test_add_argparse_subcommand_ignores_user_installed_tutorials(
         "# Step one\n\n"
         "Do it.\n"
     )
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: tutorial_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: tutorial_dir)
 
     tutorial_path = write_demo_tutorial(tmp_path)
     parser = argparse.ArgumentParser()
@@ -3833,7 +3833,7 @@ def _develop_no_user_tutorials(monkeypatch, tmp_path):
 
     empty_dir = tmp_path / "user-empty"
     empty_dir.mkdir()
-    monkeypatch.setattr("tutorial.cli.user_tutorial_dir", lambda: empty_dir)
+    monkeypatch.setattr("pytorial.cli.user_tutorial_dir", lambda: empty_dir)
 
 
 def _write_develop_demo(root: Path) -> Path:

@@ -25,7 +25,7 @@ student worked through the tutorial.
 <<test [[model.py]]>>=
 """Tests for the tutorial model."""
 
-from tutorial.model import *
+from pytorial.model import *
 
 <<test functions>>
 @

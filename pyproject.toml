@@ -26,29 +26,29 @@ dependencies = [
 ]
 
 [project.scripts]
-tutorial = "tutorial.cli:app"
-pytorial = "tutorial.cli:app"
+tutorial = "pytorial.cli:app"
+pytorial = "pytorial.cli:app"
 
 [project.urls]
 repository = "https://github.com/dbosk/tutorial"
 "Bug Tracker" = "https://github.com/dbosk/tutorial/issues"
 
 [tool.poetry]
-packages = [{include = "tutorial", from = "src"}]
+packages = [{include = "pytorial", from = "src"}]
 include = [
   {path = "src/**/*.py", format = "wheel"},
-  {path = "src/tutorial/tutorials/*.md"},
+  {path = "src/pytorial/tutorials/*.md"},
 ]
 exclude = [
-  "src/tutorial/.gitignore",
-  "src/tutorial/Makefile",
-  "src/tutorial/*.nw",
-  "src/tutorial/*.tex",
-  "src/tutorial/ltxobj",
-  "src/tutorial/tutorials/Makefile",
-  "src/tutorial/tutorials/*.nw",
-  "src/tutorial/tutorials/*.tex",
-  "src/tutorial/tutorials/ltxobj",
+  "src/pytorial/.gitignore",
+  "src/pytorial/Makefile",
+  "src/pytorial/*.nw",
+  "src/pytorial/*.tex",
+  "src/pytorial/ltxobj",
+  "src/pytorial/tutorials/Makefile",
+  "src/pytorial/tutorials/*.nw",
+  "src/pytorial/tutorials/*.tex",
+  "src/pytorial/tutorials/ltxobj",
 ]
 
 [tool.black]

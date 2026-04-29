@@ -34,12 +34,12 @@ from pathlib import Path
 
 import pytest
 
-from tutorial.catalog import TutorialCatalog
-from tutorial.run import *
-from tutorial.shell import EditorResult
-from tutorial.shell import ShellResult
-from tutorial.shell import run_scripted_shell
-from tutorial.state import StateStore
+from pytorial.catalog import TutorialCatalog
+from pytorial.run import *
+from pytorial.shell import EditorResult
+from pytorial.shell import ShellResult
+from pytorial.shell import run_scripted_shell
+from pytorial.state import StateStore
 
 <<test functions>>
 @
@@ -64,21 +64,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from tutorial.catalog import TutorialCatalog
-from tutorial.model import StepTranscript
-from tutorial.model import TextMatch
-from tutorial.model import Tutorial
-from tutorial.model import TutorialRun
-from tutorial.model import TutorialStep
-from tutorial.model import step_kind
-from tutorial.shell import EditorResult
-from tutorial.shell import run_editor
-from tutorial.shell import ShellResult
-from tutorial.shell import run_interactive_shell
-from tutorial.state import ProgressState
-from tutorial.state import StateStore
-from tutorial.state import count_completed_steps
-from tutorial.state import latest_step_transcripts
+from pytorial.catalog import TutorialCatalog
+from pytorial.model import StepTranscript
+from pytorial.model import TextMatch
+from pytorial.model import Tutorial
+from pytorial.model import TutorialRun
+from pytorial.model import TutorialStep
+from pytorial.model import step_kind
+from pytorial.shell import EditorResult
+from pytorial.shell import run_editor
+from pytorial.shell import ShellResult
+from pytorial.shell import run_interactive_shell
+from pytorial.state import ProgressState
+from pytorial.state import StateStore
+from pytorial.state import count_completed_steps
+from pytorial.state import latest_step_transcripts
 @
 
 

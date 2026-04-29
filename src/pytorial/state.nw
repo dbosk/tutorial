@@ -26,11 +26,11 @@ debugging the tool can inspect it without special utilities.
 
 from pathlib import Path
 
-from tutorial.model import StepTranscript
-from tutorial.model import Tutorial
-from tutorial.model import TutorialRun
-from tutorial.model import TutorialStep
-from tutorial.state import *
+from pytorial.model import StepTranscript
+from pytorial.model import Tutorial
+from pytorial.model import TutorialRun
+from pytorial.model import TutorialStep
+from pytorial.state import *
 
 <<test functions>>
 @
@@ -54,9 +54,9 @@ from pathlib import Path
 
 import platformdirs
 
-from tutorial.model import StepTranscript
-from tutorial.model import Tutorial
-from tutorial.model import TutorialRun
+from pytorial.model import StepTranscript
+from pytorial.model import Tutorial
+from pytorial.model import TutorialRun
 @
 
 
