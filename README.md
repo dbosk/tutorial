@@ -1,4 +1,4 @@
-# tutorial
+# pytorial
 
 A Python library for interactive command-line tutorials.
 
