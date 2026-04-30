@@ -63,6 +63,8 @@ summary: Create a tutorial file, add shell, editor, and question steps, and load
 
 <<test the tutorial step>>
 
+<<contrast no-allow-shell step>>
+
 <<develop step>>
 
 <<inspect finished step>>
@@ -687,19 +689,21 @@ treatment of [[--restart]].
 
 ```tutorial-step
 required_patterns:
-  - tutorial run --tutorial-path my-tutorials greeting
+  - tutorial run --allow-shell --tutorial-path my-tutorials greeting
   - "greeting $"
   - "Step not complete yet: Say hello"
 hint: Start `greeting`, then leave its first shell with `exit`.
 ```
 
-Run `tutorial run --tutorial-path my-tutorials greeting`.
+Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
 
 This still tests a different aspect from `tutorial list --tutorial-path
 my-tutorials`. Listing only proves that the file parses and the tutorial is
 discoverable. Running it proves that the authored tutorial still starts
 with the expected shell backend even after you add editor and question
-steps later in the file.
+steps later in the file. By this point the tutorial also contains
+`pre_command`, `check_command`, and `post_command`, so standalone `run`
+must be told to trust those hooks explicitly.
 
 Keep the tutorial file itself invariant here. Only the command changes: you
 now move from inspecting tutorial metadata to exercising the authored
@@ -707,13 +711,58 @@ behaviour.
 
 For this step:
 
-1. Run `tutorial run --tutorial-path my-tutorials greeting`.
+1. Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
 2. When the nested shell opens with the `greeting $ ` prompt, type `exit`.
 3. The nested run should report `Step not complete yet: Say hello`.
 4. Exit this lesson's shell too so the transcript is recorded.
 @
 
-\section{Step 16: Iterate on one step with [[tutorial develop]]}
+\section{Step 16: Contrast it without [[--allow-shell]]}
+
+Step 15 added [[--allow-shell]] without forcing the learner to feel why
+it was suddenly required.  This step makes the contrast explicit: the
+same authored tutorial, the same nested-shell command, and only the
+trust flag varies.  The point is not to teach what the flag does (steps
+11--14 already did that) but to let the learner observe the gate firing
+before any shell opens.  Without that observation, an author who never
+reads documentation might silently ship a tutorial that no one can run,
+because the standalone CLI denies authored hook code by default.  The
+required patterns therefore anchor on the literal
+[[Tutorial shell hooks and validation are disabled]] refusal --- the
+absence of the [[greeting \$ ]] prompt from step 15 is itself part of
+the contrast, but [[required_patterns]] can only check for presence, so
+the refusal line stands in as the proof that the gate ran first.
+
+<<contrast no-allow-shell step>>=
+# Contrast it without `--allow-shell`
+
+```tutorial-step
+required_patterns:
+  - tutorial run --tutorial-path my-tutorials greeting
+  - Tutorial shell hooks and validation are disabled
+hint: Run the same command from step 15, but omit `--allow-shell`.
+```
+
+Predict what changes when you drop `--allow-shell` from the run command
+you used in step 15.
+
+Run `tutorial run --tutorial-path my-tutorials greeting`.
+
+Only the trust flag varies. The same tutorial file, the same target
+step, and the same nested-shell command from step 15 stay invariant.
+The runner refuses to start the step before any shell opens, because
+`pre_command`, `check_command`, and `post_command` are author-supplied
+shell that the standalone CLI does not trust by default. The literal
+`Tutorial shell hooks and validation are disabled` line is what proves
+the gate ran before the shell did.
+
+Embedded hosts default the other way: they only mount the tutorials
+they chose, so the host already made the trust decision and a learner
+running `tutorial run` inside that host sees the success path of step
+15 without adding any flag.
+@
+
+\section{Step 17: Iterate on one step with [[tutorial develop]]}
 
 [[tutorial develop]] is the authoring counterpart to [[tutorial run]]:
 it exercises one step in a temporary workspace, prints a verdict, and
@@ -725,9 +774,11 @@ re-test one step.  The required patterns include the literal
 emitted a verdict at all --- the alternative (a [[PASS]]) would also
 satisfy a generic \enquote{step finished} check but would teach the
 learner less.  We also explicitly mention that [[develop]] enables
-shell code by default, with [[--deny-shell]] as the opt-out;
-this is the inverse default of [[run]] and is the kind of asymmetry
-that bites authors who do not know about it.
+shell code by default, with [[--no-allow-shell]] as the opt-out;
+this is the inverse default of \emph{standalone} [[run]] (embedded
+hosts already default to allow, matching develop), and the asymmetry
+between develop and the standalone CLI authors actually use to test
+their tutorials is the kind that bites people who do not know about it.
 
 <<develop step>>=
 # Iterate on one step with `tutorial develop`
@@ -754,11 +805,11 @@ For this step:
 prints `PASS` or `FAIL`, and lets you edit and re-run that step without
 restarting the whole tutorial. We point at step `1` by number here, but the
 same command also accepts a regex that matches the step title. Develop also
-enables shell code by default; pass `--deny-shell` to turn it off for one
+enables shell code by default; pass `--no-allow-shell` to turn it off for one
 session.
 @
 
-\section{Step 17: Inspect the finished tutorial}
+\section{Step 18: Inspect the finished tutorial}
 
 The closing step is the variation-theory \emph{fusion} move at the
 tutorial level: a single [[required_patterns]] block enumerates the
@@ -797,10 +848,11 @@ hint: List the tutorials, then display the file you wrote.
 Run `tutorial list --tutorial-path my-tutorials` and
 `cat my-tutorials/greeting.md`.
 
-At this point you have checked the same tutorial in three different ways:
+At this point you have checked the same tutorial in four different ways:
 
 - `tutorial list --tutorial-path my-tutorials` shows that it loads
-- `tutorial run --tutorial-path my-tutorials greeting` shows that it runs
+- `tutorial run --allow-shell --tutorial-path my-tutorials greeting` shows that it runs once shell hooks are trusted
+- `tutorial run --tutorial-path my-tutorials greeting` (without `--allow-shell`) shows the standalone trust gate refusing untrusted hook code
 - `cat my-tutorials/greeting.md` lets you inspect the final shell, editor,
   hook, shell-check, and question metadata directly
 @

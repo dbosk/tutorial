@@ -75,6 +75,27 @@ def write_demo_tutorial(root_dir: str | Path) -> Path:
 """
     )
     return tutorial_path
+
+
+def write_hook_tutorial(root_dir: str | Path) -> Path:
+    """Write a one-step tutorial whose shell hook proves it executed."""
+
+    tutorial_path = Path(root_dir) / "hooks.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: hooks\n"
+        "title: Hooks\n"
+        "summary: Exercise shell hooks.\n"
+        "---\n\n"
+        "# Prepare\n\n"
+        "```tutorial-step\n"
+        "pre_command: export READY=prepared\n"
+        "required_patterns:\n"
+        "  - prepared\n"
+        "```\n\n"
+        "Print `$READY`.\n"
+    )
+    return tutorial_path
 @
 
 We start with one small tutorial identity that is stable across every CLI test.
@@ -457,10 +478,11 @@ def require_tutorial_paths(
 
 Some commands add temporary tutorial paths, question backends, or validation
 flags, but the rule for turning those into one [[TutorialRunner]] should stay
-the same across Typer and argparse.  The shared helper below makes that
-command-scoped runner wiring explicit in one place, so later front-end
-sections can focus on prompts and exit conventions instead of rebuilding the
-same path logic.
+the same across Typer and argparse.  The shared helper below takes the
+already-resolved shell-trust decision for one invocation, so the front-end
+layers can differ only in how they choose that boolean.  That separation is
+what lets standalone default to deny while embedded hosts default to allow
+without duplicating runner setup.
 
 <<functions>>=
 def build_command_runner(
@@ -473,7 +495,6 @@ def build_command_runner(
     editor_runner: Callable[..., object] = run_editor,
     question_runner: Callable[..., ShellResult] | None = None,
     allow_shell: bool = False,
-    command_allow_shell: bool = False,
     require_paths: bool = False,
 ) -> TutorialRunner:
     """Build a runner for one concrete command invocation."""
@@ -491,7 +512,7 @@ def build_command_runner(
         shell_runner=shell_runner,
         editor_runner=editor_runner,
         question_runner=question_runner,
-        allow_shell=allow_shell or command_allow_shell,
+        allow_shell=allow_shell,
     )
 @
 
@@ -2251,14 +2272,15 @@ def configured_tutorial_paths() -> tuple[str | Path, ...]:
 Every command eventually needs the same runner wiring: combine tutorial paths,
 optionally require at least one path, and thread through the chosen backends.
 The local closure adapts the shared [[build_command_runner()]] helper to the
-current app factory so the Typer sections below can talk about command-specific
-behaviour rather than replaying the runner setup.
+current app factory and closure-captures the default shell-trust choice.
+Commands can then override that default per invocation without an extra merge
+step, which is what makes [[--no-allow-shell]] meaningful in embedded mode.
 
 <<define shared runner factory>>=
 def runner(
     *,
     command_tutorial_paths: tuple[str | Path, ...] = (),
-    command_allow_shell: bool = False,
+    allow_shell: bool = allow_shell,
     require_paths: bool = False,
     question_runner_override: Callable[..., ShellResult] | None = None,
 ) -> TutorialRunner:
@@ -2271,7 +2293,6 @@ def runner(
         editor_runner=editor_runner,
         question_runner=question_runner_override or question_runner,
         allow_shell=allow_shell,
-        command_allow_shell=command_allow_shell,
         require_paths=require_paths,
     )
 @
@@ -2347,7 +2368,25 @@ The run command owns the most interactive path, so it only keeps the actual
 prompt primitives local.  Step presentation and question-step dispatch now come
 from shared helpers, which makes the contrast with argparse honest: the two
 front ends differ in prompting surface and exit handling, not in tutorial-flow
-policy.
+policy.  The only policy chosen here is the default for one application shell:
+standalone starts from
+\enquote{deny shell hooks unless asked}, while embedded hosts start from
+\enquote{allow the trusted tutorials this host mounted}.
+
+The Typer and argparse front ends both expose [[--allow-shell]] on their
+[[run]] command, and both must document the asymmetric default the same
+way.  Pulling the help text into one constant prevents the two surfaces
+from drifting: a user who reads [[--help]] from an argparse-embedded host
+sees the same contract as one who reads it from the standalone Typer CLI.
+
+<<constants>>=
+RUN_ALLOW_SHELL_HELP = (
+    "Trust tutorial-authored shell code in pre_command, "
+    "check_command, and post_command for this run. "
+    "Defaults to allow when embedded as a subcommand and "
+    "deny when run standalone."
+)
+@
 
 <<register run command>>=
 @application.command("run")
@@ -2376,13 +2415,10 @@ def run_command(
     allow_shell_flag: Annotated[
         bool,
         typer.Option(
-            "--allow-shell",
-            help=(
-                "Trust tutorial-authored shell code in pre_command, "
-                "check_command, and post_command for this run."
-            ),
+            "--allow-shell/--no-allow-shell",
+            help=RUN_ALLOW_SHELL_HELP,
         ),
-    ] = False,
+    ] = allow_shell,
 ) -> None:
     """Run or resume one tutorial."""
 
@@ -2413,7 +2449,7 @@ def run_command(
     try:
         tutorial_runner = runner(
             command_tutorial_paths=tuple(tutorial_path or ()),
-            command_allow_shell=allow_shell_flag,
+            allow_shell=allow_shell_flag,
             require_paths=True,
             question_runner_override=command_question_runner,
         )
@@ -2752,6 +2788,95 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
     assert "Answer with an option number or the full option text." in result.stdout
     assert "Answer with option numbers or texts separated by commas." in result.stdout
     assert "Completed shell-basics" in result.stdout
+
+
+def test_standalone_run_denies_shell_hooks_by_default(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+
+    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+        return run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            workspace=workspace,
+            prompt_name=prompt_name,
+            pre_command=pre_command,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+        ),
+        [
+            "run",
+            "--tutorial-path",
+            str(tutorial_path),
+            "hooks",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Tutorial shell hooks and validation are disabled" in result.stderr
+
+
+def test_standalone_run_allows_shell_hooks_with_allow_shell(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+
+    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+        return run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            workspace=workspace,
+            prompt_name=prompt_name,
+            pre_command=pre_command,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+        ),
+        [
+            "run",
+            "--tutorial-path",
+            str(tutorial_path),
+            "--allow-shell",
+            "hooks",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Completed hooks" in result.stdout
+
+
+def test_standalone_run_no_allow_shell_blocks_hooks(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+
+    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+        return run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            workspace=workspace,
+            prompt_name=prompt_name,
+            pre_command=pre_command,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create_standalone_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+        ),
+        [
+            "run",
+            "--tutorial-path",
+            str(tutorial_path),
+            "--no-allow-shell",
+            "hooks",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Tutorial shell hooks and validation are disabled" in result.stderr
 @
 
 
@@ -2814,7 +2939,20 @@ def test_emit_run_summary_reports_completed_tutorial(capsys, tmp_path):
 
 Typer already has a clean composition API, so the helper only needs to
 build a configured sub-application and register it under the requested
-name.
+name.  The important policy difference is trust: embedded hosts only expose
+packaged tutorials plus the paths the host application passed explicitly, so
+the subcommand can default to allowing shell hooks while still offering an
+opt-out for one run.
+
+Both embedding helpers carry the same one-paragraph rationale in their
+docstrings.  We define it once as a shared chunk and reference it from
+each docstring so the two surfaces cannot drift; the literate source then
+has exactly one sentence to update if the contract ever changes.
+
+<<embed trust rationale>>=
+Embedded hosts mount only trusted bundled tutorials and host-provided
+paths, so shell hooks default to allowed there.
+@
 
 <<functions>>=
 def add_typer_subcommand(
@@ -2827,9 +2965,12 @@ def add_typer_subcommand(
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
     question_runner: Callable[..., ShellResult] | None = None,
-    allow_shell: bool = False,
+    allow_shell: bool = True,
 ) -> typer.Typer:
-    """Attach the tutorial CLI as a Typer subcommand."""
+    """Attach the tutorial CLI as a Typer subcommand.
+
+    <<embed trust rationale>>
+    """
 
     child_app = create_app(
         namespace=namespace,
@@ -2920,6 +3061,49 @@ def test_add_typer_subcommand_ignores_user_installed_tutorials(
 
     assert result.exit_code == 0
     assert "installed-demo\t" not in result.stdout
+
+
+def test_add_typer_subcommand_allows_shell_hooks_by_default(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+    parent = typer.Typer()
+    add_typer_subcommand(
+        parent,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+        shell_runner=lambda **kwargs: run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            **kwargs,
+        ),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(parent, ["tutorial", "run", "hooks"])
+
+    assert result.exit_code == 0
+    assert "Completed hooks" in result.stdout
+
+
+def test_add_typer_subcommand_honours_no_allow_shell_override(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+    parent = typer.Typer()
+    add_typer_subcommand(
+        parent,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+        shell_runner=lambda **kwargs: run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            **kwargs,
+        ),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        parent,
+        ["tutorial", "run", "--no-allow-shell", "hooks"],
+    )
+
+    assert result.exit_code == 1
+    assert "Tutorial shell hooks and validation are disabled" in result.stderr
 @
 
 
@@ -2927,7 +3111,9 @@ def test_add_typer_subcommand_ignores_user_installed_tutorials(
 
 Argparse composition needs a little more plumbing because there is no
 native equivalent of Typer's sub-app mounting.  We therefore create the
-subparser tree and store a callable on each leaf parser.
+subparser tree and store a callable on each leaf parser.  The trust rule stays
+the same as the Typer helper: embedded hosts default to allowing shell hooks
+because the host chose the reachable tutorials.
 
 <<functions>>=
 def add_argparse_subcommand(
@@ -2940,9 +3126,12 @@ def add_argparse_subcommand(
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
     question_runner: Callable[..., ShellResult] | None = None,
-    allow_shell: bool = False,
+    allow_shell: bool = True,
 ) -> argparse.ArgumentParser:
-    """Attach the tutorial CLI as an argparse subcommand tree."""
+    """Attach the tutorial CLI as an argparse subcommand tree.
+
+    <<embed trust rationale>>
+    """
 
     parser = subparsers.add_parser(name, help="Run interactive tutorials")
     tutorial_subparsers = parser.add_subparsers(dest="tutorial_command")
@@ -2993,11 +3182,9 @@ def add_argparse_subcommand(
     )
     run_parser.add_argument(
         "--allow-shell",
-        action="store_true",
-        help=(
-            "Trust tutorial-authored shell code in pre_command, "
-            "check_command, and post_command for this run."
-        ),
+        action=argparse.BooleanOptionalAction,
+        default=allow_shell,
+        help=RUN_ALLOW_SHELL_HELP,
     )
     run_parser.add_argument("tutorial_id")
     run_parser.add_argument("--restart", action="store_true")
@@ -3010,7 +3197,6 @@ def add_argparse_subcommand(
             shell_runner=shell_runner,
             editor_runner=editor_runner,
             question_runner=question_runner,
-            allow_shell=allow_shell,
         )
     )
     return parser
@@ -3089,6 +3275,58 @@ def test_add_argparse_subcommand_ignores_user_installed_tutorials(
 
     assert exit_code == 0
     assert "installed-demo\t" not in captured.out
+
+
+def test_add_argparse_subcommand_allows_shell_hooks_by_default(
+    tmp_path,
+    capsys,
+):
+    tutorial_path = write_hook_tutorial(tmp_path)
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+    add_argparse_subcommand(
+        subparsers,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+        shell_runner=lambda **kwargs: run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            **kwargs,
+        ),
+    )
+
+    args = parser.parse_args(["tutorial", "run", "hooks"])
+    exit_code = run_argparse_command(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Completed hooks" in captured.out
+
+
+def test_add_argparse_subcommand_honours_no_allow_shell_override(
+    tmp_path,
+    capsys,
+):
+    tutorial_path = write_hook_tutorial(tmp_path)
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+    add_argparse_subcommand(
+        subparsers,
+        state_root=tmp_path / "state",
+        tutorial_paths=(tutorial_path,),
+        shell_runner=lambda **kwargs: run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            **kwargs,
+        ),
+    )
+
+    args = parser.parse_args(["tutorial", "run", "--no-allow-shell", "hooks"])
+    exit_code = run_argparse_command(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Tutorial shell hooks and validation are disabled" in captured.out
 @
 
 
@@ -3234,7 +3472,6 @@ def argparse_run_command(
     shell_runner: Callable[..., object],
     editor_runner: Callable[..., object],
     question_runner: Callable[..., ShellResult] | None,
-    allow_shell: bool,
 ) -> int:
     """Implement the argparse ``run`` subcommand."""
 
@@ -3258,8 +3495,7 @@ def argparse_run_command(
             shell_runner=shell_runner,
             editor_runner=editor_runner,
             question_runner=command_question_runner,
-            allow_shell=allow_shell,
-            command_allow_shell=args.allow_shell,
+            allow_shell=args.allow_shell,
             require_paths=True,
         )
 
@@ -3350,7 +3586,6 @@ def test_argparse_run_command_handles_question_steps(
         shell_runner=scripted_runner,
         editor_runner=fake_editor_runner,
         question_runner=None,
-        allow_shell=False,
     )
     captured = capsys.readouterr()
 
@@ -3624,7 +3859,7 @@ def develop_command(
     allow_shell_flag: Annotated[
         bool,
         typer.Option(
-            "--allow-shell/--deny-shell",
+            "--allow-shell/--no-allow-shell",
             help=(
                 "Trust tutorial-authored shell code in pre_command, "
                 "check_command, and post_command (default on for develop)."
