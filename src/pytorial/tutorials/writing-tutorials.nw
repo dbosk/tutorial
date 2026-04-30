@@ -55,6 +55,12 @@ summary: Create a tutorial file, add shell, editor, and question steps, and load
 
 <<add shell check step>>
 
+<<add pre-command setup step>>
+
+<<contrast multiline pre-command step>>
+
+<<add post-command cleanup step>>
+
 <<test the tutorial step>>
 
 <<develop step>>
@@ -497,7 +503,7 @@ shape of [[test "\$(cat hello.txt)" = ...]].  The prose lays out
 three rules that authors must internalise:
 \begin{enumerate}
 \item the runner refuses to execute [[check_command]] unless the
-  learner passes [[--allow-shell-checks]],
+  learner passes [[--allow-shell]],
 \item it runs in a separate [[/bin/bash -lc]] process with the
   workspace as cwd, so it sees files but not session state, and
 \item it AND-s with [[required_patterns]], so both checks must pass.
@@ -532,7 +538,7 @@ Open `hello.txt` and add `hello from the editor`.
 ````
 
 `check_command` is opt-in. The runner refuses to execute it unless the
-reader passes `--allow-shell-checks`. It runs in a separate
+reader passes `--allow-shell`. It runs in a separate
 `/bin/bash -lc` process with the tutorial workspace as its current
 directory, so it can inspect files there but it does not inherit shell
 variables or other session state from the interactive step. It is also
@@ -540,7 +546,128 @@ AND-ed with `required_patterns`: both checks must pass before the step
 completes.
 @
 
-\section{Step 12: Test the tutorial you wrote}
+\section{Step 12: Add a hidden shell [[pre_command]]}
+
+Before reading the example, predict how you would prepare a shell step so the
+learner arrives at a prompt where setup has already happened.  That is the job
+of [[pre_command]] for shell steps.  From the student's perspective, they've
+already run the setup; they do not know each step spawns a fresh shell; the
+tutorial should preserve the illusion of one continuous terminal session;
+re-showing setup commands each step would expose the seams.
+
+<<add pre-command setup step>>=
+# Add a hidden shell `pre_command`
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "pre_command: export GREETING_TARGET=world"
+  - "echo hello \"$GREETING_TARGET\""
+```
+
+Keep the same `# Say hello` step, but add hidden shell setup:
+
+````md
+# Say hello
+
+```tutorial-step
+pre_command: export GREETING_TARGET=world
+required_patterns:
+  - echo hello "$GREETING_TARGET"
+```
+
+Run `echo hello "$GREETING_TARGET"`.
+````
+
+For shell steps, `pre_command` runs before the interactive shell opens.  The
+student sees the prepared prompt, not the setup transcript.  Like
+`check_command`, it only runs when the learner passes `--allow-shell`.
+@
+
+\section{Step 13: Contrast it with a multiline [[pre_command]]}
+
+Now vary the script shape while keeping the setup idea invariant.  Predict what
+must stay inside one shell process when the setup both changes directory and
+writes a file.  The critical aspect is that YAML [[|]] preserves line breaks so
+one bash invocation sees the whole hook.  YAML [[>]] would fold those lines
+together into spaces and often break shell syntax.
+
+<<contrast multiline pre-command step>>=
+# Contrast it with a multiline `pre_command`
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "pre_command: |"
+  - "  mkdir -p setup"
+  - "  cd setup"
+  - "  printf 'world\\n' > target.txt"
+```
+
+Keep the same `# Say hello` step, but replace the single-line setup with this
+multiline one:
+
+````md
+# Say hello
+
+```tutorial-step
+pre_command: |
+  mkdir -p setup
+  cd setup
+  printf 'world\n' > target.txt
+required_patterns:
+  - cat setup/target.txt
+```
+
+Run `cat setup/target.txt`.
+````
+
+Use YAML `|` for multiline shell hooks.  The whole string is passed to one bash
+invocation, so `cd`, exported variables, and shell options persist across lines
+within that hook.  Do not use YAML `>` here.
+@
+
+\section{Step 14: Add a cleanup [[post_command]]}
+
+Predict the cleanup rule before you read it: should a tutorial clean up even
+when the learner has not finished the step correctly?  No.  Cleanup belongs
+only after success, otherwise the learner loses the workspace state they need
+to fix.
+
+<<add post-command cleanup step>>=
+# Add a cleanup `post_command`
+
+```tutorial-step
+edit_file: my-tutorials/greeting.md
+required_patterns:
+  - "post_command: rm -f setup/target.txt"
+```
+
+Keep the same `# Say hello` step, but add cleanup after validation passes:
+
+````md
+# Say hello
+
+```tutorial-step
+pre_command: |
+  mkdir -p setup
+  cd setup
+  printf 'world\n' > target.txt
+required_patterns:
+  - cat setup/target.txt
+post_command: rm -f setup/target.txt
+```
+
+Run `cat setup/target.txt`.
+````
+
+`post_command` runs only after the step passes.  If validation fails, the
+runner skips cleanup so the learner keeps a fixable workspace.  Because the
+interactive shell is already gone, `post_command` runs in a fresh workspace
+shell process.
+@
+
+\section{Step 15: Test the tutorial you wrote}
 
 After ten steps of authoring, this step finally \emph{runs} the
 authored tutorial and tests a different invariant from step~3's
@@ -586,7 +713,7 @@ For this step:
 4. Exit this lesson's shell too so the transcript is recorded.
 @
 
-\section{Step 13: Iterate on one step with [[tutorial develop]]}
+\section{Step 16: Iterate on one step with [[tutorial develop]]}
 
 [[tutorial develop]] is the authoring counterpart to [[tutorial run]]:
 it exercises one step in a temporary workspace, prints a verdict, and
@@ -598,7 +725,7 @@ re-test one step.  The required patterns include the literal
 emitted a verdict at all --- the alternative (a [[PASS]]) would also
 satisfy a generic \enquote{step finished} check but would teach the
 learner less.  We also explicitly mention that [[develop]] enables
-shell checks by default, with [[--deny-shell-checks]] as the opt-out;
+shell code by default, with [[--deny-shell]] as the opt-out;
 this is the inverse default of [[run]] and is the kind of asymmetry
 that bites authors who do not know about it.
 
@@ -627,17 +754,18 @@ For this step:
 prints `PASS` or `FAIL`, and lets you edit and re-run that step without
 restarting the whole tutorial. We point at step `1` by number here, but the
 same command also accepts a regex that matches the step title. Develop also
-enables shell checks by default; pass `--deny-shell-checks` to turn them
-off for one session.
+enables shell code by default; pass `--deny-shell` to turn it off for one
+session.
 @
 
-\section{Step 14: Inspect the finished tutorial}
+\section{Step 17: Inspect the finished tutorial}
 
 The closing step is the variation-theory \emph{fusion} move at the
 tutorial level: a single [[required_patterns]] block enumerates the
 distinctive markers of every feature the learner has added in
-sequence (regex pattern, three [[kind]] values, an [[edit_file]],
-the [[check_command]], an output-anchored regex).  Validating against
+sequence (regex pattern, three [[kind]] values, an [[edit_file]], the
+[[pre_command]], the [[check_command]], the [[post_command]], and an output-
+anchored regex).  Validating against
 all of them simultaneously proves the file accumulated correctly,
 without any earlier feature getting clobbered.  Pairing
 [[tutorial list --tutorial-path my-tutorials]] with
@@ -659,7 +787,9 @@ required_patterns:
   - "kind: single_select"
   - "kind: multi_select"
   - "edit_file: hello.txt"
+  - "pre_command: |"
   - 'check_command: test "$(cat hello.txt)" = "hello from the editor"'
+  - "post_command: rm -f setup/target.txt"
   - "    pattern: (?i)hello(?:\\s+)?$"
 hint: List the tutorials, then display the file you wrote.
 ```
@@ -672,5 +802,5 @@ At this point you have checked the same tutorial in three different ways:
 - `tutorial list --tutorial-path my-tutorials` shows that it loads
 - `tutorial run --tutorial-path my-tutorials greeting` shows that it runs
 - `cat my-tutorials/greeting.md` lets you inspect the final shell, editor,
-  shell-check, and question metadata directly
+  hook, shell-check, and question metadata directly
 @
