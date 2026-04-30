@@ -49,15 +49,15 @@ tutorial review <id> --step 2
 tutorial review <id> --run-id <run-id>
 ```
 
-### Trust author-supplied shell checks
+### Trust author-supplied shell code
 
 ```
-tutorial run --allow-shell-checks <id>
+tutorial run --allow-shell <id>
 ```
 
-A tutorial step may declare a `check_command` that runs in your shell
-to validate the step. This validation is opt-in: pass
-`--allow-shell-checks` only when you trust the tutorial author.
+A tutorial step may declare `pre_command`, `check_command`, or
+`post_command`. Those fields run author-supplied shell code, so they are
+opt-in: pass `--allow-shell` only when you trust the tutorial author.
 
 ## Writing tutorials
 
@@ -92,8 +92,8 @@ Step body in Markdown.
 - Required front-matter fields: `id`, `title`, `summary`.
 - Each top-level `# Heading` becomes one step.
 - A step may begin with a fenced `tutorial-step` YAML block. Recognised
-  fields are `required_patterns`, `check_command`, `hint`, `edit_file`,
-  `kind`, `options`, and `answers`.
+  fields are `required_patterns`, `pre_command`, `check_command`,
+  `post_command`, `hint`, `edit_file`, `kind`, `options`, and `answers`.
 - Without `kind` or `edit_file`, a step opens an interactive shell.
 - `edit_file` opens a workspace-relative file in `$EDITOR`, falling
   back to `vim`, `vi`, or `nano` when `$EDITOR` is unset.
@@ -102,8 +102,13 @@ Step body in Markdown.
   answers use the same string-or-`{mode, pattern}` format as
   `required_patterns`; select questions use literal option text in
   `options` and `answers`.
-- `check_command` only runs when the reader passes
-  `--allow-shell-checks`.
+- `pre_command`, `check_command`, and `post_command` only run when the
+  reader passes `--allow-shell`.
+- Use one YAML string for each shell field. Multi-line shell scripts
+  should use YAML `|` so one bash process sees the whole script and keeps
+  `cd`, `export`, and shell options across lines.
+- Do not use YAML `>` for shell fields: it folds newlines into spaces and
+  can break shell syntax.
 
 ### Share and install
 

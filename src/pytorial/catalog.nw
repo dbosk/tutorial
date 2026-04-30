@@ -572,6 +572,10 @@ hints, and editor-step configuration are the exception, so we reserve a
 small leading code fence with the language tag [[tutorial-step]] for that
 metadata.
 
+YAML literal blocks add one subtle requirement here: the parser must keep the
+metadata fence text with its original line endings, or a trailing newline from
+[[|]] content disappears before YAML ever sees it.
+
 <<constants>>=
 STEP_METADATA_FENCE = "```tutorial-step"
 @
@@ -581,16 +585,16 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
     """Return ``(metadata, instructions)`` for one step body."""
 
     stripped_body = section_body.strip()
-    lines = stripped_body.splitlines()
+    lines = stripped_body.splitlines(keepends=True)
     if not lines or lines[0].strip() != STEP_METADATA_FENCE:
         return {}, stripped_body
 
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "```":
-            metadata = yaml.safe_load("\n".join(lines[1:index])) or {}
+            metadata = yaml.safe_load("".join(lines[1:index])) or {}
             if not isinstance(metadata, dict):
                 raise ValueError("Tutorial step metadata must be a YAML mapping.")
-            instructions = "\n".join(lines[index + 1 :]).strip()
+            instructions = "".join(lines[index + 1 :]).strip()
             return metadata, instructions
 
     raise ValueError("Tutorial step metadata is missing its closing ``` fence.")
@@ -614,6 +618,15 @@ The recorded-text checks are slightly richer.  Tutorials may still use a
 simple YAML list of strings, but each item can also be a small mapping with
 an explicit match mode.  That keeps common cases short while leaving room
 for regular expressions when a step genuinely needs them.
+
+The shell-bearing hook fields stay simpler.  [[pre_command]],
+[[check_command]], and [[post_command]] are each one optional string, even
+when they contain several shell lines.  That single-string shape matters
+because one [[bash -lc]] invocation must see the whole script at once, so
+[[cd]], [[export]], and shell options persist across the lines of one hook.
+It also means the loader should preserve the authored string exactly, rather
+than trimming away the trailing newline that YAML literal blocks naturally
+carry.
 
 <<functions>>=
 def build_tutorial_step(title: str, section_body: str) -> TutorialStep:
@@ -640,6 +653,8 @@ reject_unknown_keys(
         "hint",
         "kind",
         "options",
+        "post_command",
+        "pre_command",
         "required_patterns",
     },
     f"Step {title!r}",
@@ -696,9 +711,20 @@ return TutorialStep(
         metadata.get("required_patterns"),
         f"Step {title!r} required_patterns",
     ),
+    pre_command=optional_string(
+        metadata.get("pre_command"),
+        f"Step {title!r} pre_command",
+        preserve_whitespace=True,
+    ),
     check_command=optional_string(
         metadata.get("check_command"),
         f"Step {title!r} check_command",
+        preserve_whitespace=True,
+    ),
+    post_command=optional_string(
+        metadata.get("post_command"),
+        f"Step {title!r} post_command",
+        preserve_whitespace=True,
     ),
     hint=optional_string(metadata.get("hint"), f"Step {title!r} hint"),
     edit_file=edit_file,
@@ -733,6 +759,53 @@ def test_load_tutorial_file_parses_step_metadata_block(tmp_path):
     assert tutorial.steps[0].check_command == "test -f notes.txt"
     assert tutorial.steps[0].hint == "Try pwd first."
     assert tutorial.steps[0].instructions == "Run `pwd`."
+
+
+def test_load_tutorial_file_parses_pre_and_post_commands(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```tutorial-step\n"
+        "pre_command: mkdir -p notes\n"
+        "post_command: rm -f notes.tmp\n"
+        "```\n\n"
+        "Run `pwd`.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].pre_command == "mkdir -p notes"
+    assert tutorial.steps[0].post_command == "rm -f notes.tmp"
+
+
+def test_load_tutorial_file_keeps_multiline_hook_commands(tmp_path):
+    tutorial_path = tmp_path / "demo.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "```tutorial-step\n"
+        "pre_command: |\n"
+        "  mkdir -p notes\n"
+        "  cd notes\n"
+        "  touch ready.txt\n"
+        "```\n\n"
+        "Run `pwd`.\n"
+    )
+
+    tutorial = load_tutorial_file(tutorial_path)
+
+    assert tutorial.steps[0].pre_command == (
+        "mkdir -p notes\ncd notes\ntouch ready.txt\n"
+    )
 @
 
 <<test functions>>=
@@ -971,14 +1044,50 @@ def require_string(metadata: dict, key: str, context: str) -> str:
 @
 
 <<functions>>=
-def optional_string(value: object, context: str) -> str | None:
+def optional_string(
+    value: object,
+    context: str,
+    *,
+    preserve_whitespace: bool = False,
+) -> str | None:
     """Return ``value`` as a string or [[None]]."""
 
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context} must be a non-empty string when set.")
+    if preserve_whitespace:
+        return value
     return value.strip()
+@
+
+<<test functions>>=
+def test_optional_string_rejects_empty_hook_commands():
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        optional_string("   ", "Step 'Demo' pre_command")
+
+
+def test_build_tutorial_step_rejects_non_string_hook_commands():
+    with pytest.raises(ValueError, match="pre_command must be a non-empty string"):
+        build_tutorial_step(
+            "Demo",
+            "```tutorial-step\n"
+            "pre_command:\n"
+            "  - mkdir notes\n"
+            "```\n\n"
+            "Run `pwd`.\n",
+        )
+
+
+def test_build_tutorial_step_rejects_empty_post_command():
+    with pytest.raises(ValueError, match="post_command must be a non-empty string"):
+        build_tutorial_step(
+            "Demo",
+            "```tutorial-step\n"
+            "post_command: ''\n"
+            "```\n\n"
+            "Run `pwd`.\n",
+        )
 @
 
 Question steps use literal options, while free-text input steps reuse the
@@ -1190,8 +1299,12 @@ def step_metadata_for_serialization(step: TutorialStep) -> dict:
         metadata["required_patterns"] = [
             serialize_text_match(pattern) for pattern in step.required_patterns
         ]
+    if step.pre_command is not None:
+        metadata["pre_command"] = step.pre_command
     if step.check_command is not None:
         metadata["check_command"] = step.check_command
+    if step.post_command is not None:
+        metadata["post_command"] = step.post_command
     if step.hint is not None:
         metadata["hint"] = step.hint
     if step.edit_file is not None:
@@ -1241,13 +1354,32 @@ def test_serialize_tutorial_step_round_trips_step_with_metadata():
             TextMatch("name"),
             TextMatch("^A.*", mode="regex"),
         ),
+        pre_command="mkdir -p notes",
         check_command="test -s notes.txt",
+        post_command="rm -f notes.tmp",
         hint="Try `vim notes.txt`.",
         edit_file="notes.txt",
     )
 
     rendered = serialize_tutorial_step(step)
 
+    sections = split_step_sections(rendered)
+    title, body = sections[0]
+    assert build_tutorial_step(title, body) == step
+
+
+def test_serialize_tutorial_step_round_trips_multiline_hook_commands():
+    step = TutorialStep(
+        title="Prepare workspace",
+        instructions="Run `pwd`.",
+        pre_command="mkdir -p notes\ncd notes\ntouch ready.txt\n",
+        post_command="cd ..\nrm -rf notes\n",
+    )
+
+    rendered = serialize_tutorial_step(step)
+
+    assert "pre_command:" in rendered
+    assert "mkdir -p notes" in rendered
     sections = split_step_sections(rendered)
     title, body = sections[0]
     assert build_tutorial_step(title, body) == step
@@ -1319,6 +1451,39 @@ def test_parse_tutorial_step_markdown_round_trips_minimal_step():
 
     assert step.title == "Step one"
     assert step.instructions == "Run `pwd`."
+
+
+def test_parse_tutorial_step_markdown_reads_hook_commands():
+    step = parse_tutorial_step_markdown(
+        "# Step one\n"
+        "\n"
+        "```tutorial-step\n"
+        "pre_command: mkdir -p notes\n"
+        "post_command: rm -f notes.tmp\n"
+        "```\n"
+        "\n"
+        "Run `pwd`.\n"
+    )
+
+    assert step.pre_command == "mkdir -p notes"
+    assert step.post_command == "rm -f notes.tmp"
+
+
+def test_parse_tutorial_step_markdown_reads_multiline_pre_command():
+    step = parse_tutorial_step_markdown(
+        "# Step one\n"
+        "\n"
+        "```tutorial-step\n"
+        "pre_command: |\n"
+        "  mkdir -p notes\n"
+        "  cd notes\n"
+        "  touch ready.txt\n"
+        "```\n"
+        "\n"
+        "Run `pwd`.\n"
+    )
+
+    assert step.pre_command == "mkdir -p notes\ncd notes\ntouch ready.txt\n"
 
 
 def test_parse_tutorial_step_markdown_rejects_zero_headings():

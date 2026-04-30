@@ -112,6 +112,13 @@ The dataclass itself fuses those earlier decisions back together.  It keeps
 the student-facing text, validation rules, and interaction-specific fields
 in one small record that the loader, runner, and CLI can all share.
 
+The three shell-bearing metadata fields deliberately use the same
+[[str | None]] shape.  [[check_command]] validates the finished workspace,
+while [[pre_command]] and [[post_command]] prepare or clean up that same
+workspace around the interaction.  Keeping the representation uniform makes
+the loader and serializer treat them with the same small rule: either the
+step omits the field, or it supplies one shell script string.
+
 <<classes>>=
 @dataclass(frozen=True)
 class TutorialStep:
@@ -123,7 +130,9 @@ class TutorialStep:
     options: tuple[str, ...] = ()
     answers: tuple[str | TextMatch, ...] = ()
     required_patterns: tuple[TextMatch, ...] = ()
+    pre_command: str | None = None
     check_command: str | None = None
+    post_command: str | None = None
     hint: str | None = None
     edit_file: str | None = None
 @
@@ -145,8 +154,8 @@ def step_kind(step: TutorialStep) -> str:
     return "shell"
 @
 
-Let's verify that a step can carry both transcript checks and a shell
-check.
+Let's verify that a step can carry all three shell-bearing hook fields while
+still keeping the existing validation metadata.
 
 <<test functions>>=
 def test_tutorial_step_keeps_validation_rules():
@@ -154,11 +163,15 @@ def test_tutorial_step_keeps_validation_rules():
         title="Create a file",
         instructions="Create notes.txt.",
         required_patterns=(TextMatch("notes.txt"),),
+        pre_command="mkdir -p notes",
         check_command="test -f notes.txt",
+        post_command="rm -f scratch.txt",
     )
 
     assert step.required_patterns == (TextMatch("notes.txt"),)
+    assert step.pre_command == "mkdir -p notes"
     assert step.check_command == "test -f notes.txt"
+    assert step.post_command == "rm -f scratch.txt"
 
 
 def test_tutorial_step_can_request_editor_file():

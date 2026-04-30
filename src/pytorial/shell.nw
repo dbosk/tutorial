@@ -68,8 +68,11 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import termios
 import tty
+from contextlib import contextmanager
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -464,6 +467,44 @@ The scripted and interactive shells must start bash in exactly the same PTY
 configuration.  A shared helper keeps the controlling-terminal fix in one
 place and ensures both paths see the same prompt and shell options.
 
+[[pre_command]] adds one extra requirement for shell-backed steps.  From the
+student's perspective, they've already run the setup; they do not know each
+step spawns a fresh shell; the tutorial should preserve the illusion of one
+continuous terminal session; re-showing setup commands each step would expose
+the seams.  Bash rcfiles give us exactly that behaviour: setup commands run
+before the first prompt appears, so [[cd]], [[export]], or [[source]] affect
+the session the learner sees without leaking into the transcript as authored
+commands.
+
+We write that setup script to a temporary rcfile because bash already knows
+how to source one script before showing the prompt.  The helper keeps two
+important invariants in one place: the script ends with a newline so the last
+line is sourced normally, and the temporary file is removed afterwards even if
+shell startup fails.
+
+<<functions>>=
+@contextmanager
+def pre_command_rcfile(script: str):
+    """Yield a temporary rcfile path containing ``script``."""
+
+    file_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".sh",
+        delete=False,
+    )
+    try:
+        text = script if script.endswith("\n") else script + "\n"
+        file_handle.write(text)
+        file_handle.close()
+        yield file_handle.name
+    finally:
+        try:
+            os.unlink(file_handle.name)
+        except FileNotFoundError:
+            pass
+@
+
 <<functions>>=
 def spawn_shell_process(
     *,
@@ -471,14 +512,21 @@ def spawn_shell_process(
     shell: str = "/bin/bash",
     prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
+    rcfile: str | None = None,
 ) -> tuple[int, subprocess.Popen]:
     """Start bash on a PTY and return the master fd and child process."""
 
     workspace_path = Path(workspace)
     master_fd, slave_fd = pty.openpty()
     try:
+        argv = [shell, "--noprofile"]
+        if rcfile is None:
+            argv.append("--norc")
+        else:
+            argv.extend(["--rcfile", rcfile])
+        argv.append("-i")
         process = subprocess.Popen(
-            [shell, "--noprofile", "--norc", "-i"],
+            argv,
             cwd=workspace_path,
             env=build_shell_environment(env, prompt_name=prompt_name),
             stdin=slave_fd,
@@ -588,52 +636,55 @@ def run_scripted_shell(
     shell: str = "/bin/bash",
     prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
+    pre_command: str | None = None,
 ) -> ShellResult:
     """Run ``commands`` in a PTY-backed shell and capture the transcript."""
 
-    <<record scripted session start and spawn the shell>>
+    <<record scripted session start and choose shell context>>
+    <<run scripted session inside shell context>>
+@
+
+The scripted path still uses the real PTY shell setup so tests exercise the
+same bash configuration as interactive runs.  We still separate shell setup
+from command injection, but the rcfile context must now stay open for the full
+session so bash can source the temporary file before the shell exits.
+
+<<record scripted session start and choose shell context>>=
+started_at = utc_now()
+context = (
+    pre_command_rcfile(pre_command)
+    if pre_command is not None
+    else nullcontext(None)
+)
+@
+
+<<run scripted session inside shell context>>=
+with context as rcfile:
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        prompt_name=prompt_name,
+        env=env,
+        rcfile=rcfile,
+    )
     <<normalise scripted commands and request exit>>
     <<drain the transcript and return the result>>
 @
 
-The scripted path still uses the real PTY shell setup so tests exercise the
-same bash configuration as interactive runs.  We separate that setup from
-the command injection so the shared PTY policy stays visible.
-
-<<record scripted session start and spawn the shell>>=
-started_at = utc_now()
-master_fd, process = spawn_shell_process(
-    workspace=workspace,
-    shell=shell,
-    prompt_name=prompt_name,
-    env=env,
-)
-@
-
-Tests should not have to remember a trailing newline or explicit [[exit]].
-We normalise the authored command text once, then ask the shell to exit so
-the transcript has a clear end.
-
 <<normalise scripted commands and request exit>>=
-command_text = commands
-if not command_text.endswith("\n"):
-    command_text += "\n"
-os.write(master_fd, (command_text + "exit\n").encode("utf-8"))
+command_text = commands.rstrip("\n") + "\nexit\n"
+os.write(master_fd, command_text.encode("utf-8"))
 @
-
-Again the final phase is result assembly: drain everything the PTY printed,
-wait for bash to finish, and package the session into one [[ShellResult]].
 
 <<drain the transcript and return the result>>=
 transcript = read_transcript(master_fd, process)
 os.close(master_fd)
-exit_status = process.wait()
+process.wait()
 ended_at = utc_now()
-
 return ShellResult(
     started_at=started_at,
     ended_at=ended_at,
-    exit_status=exit_status,
+    exit_status=process.returncode,
     transcript=transcript,
 )
 @
@@ -679,6 +730,68 @@ def test_run_scripted_shell_avoids_job_control_warnings(tmp_path):
 
     assert "cannot set terminal process group" not in result.transcript
     assert "no job control in this shell" not in result.transcript
+
+
+def test_run_scripted_shell_hides_pre_command_from_transcript(tmp_path):
+    result = run_scripted_shell(
+        "printf '%s\\n' \"$READY\"",
+        workspace=tmp_path,
+        pre_command="export READY=prepared",
+    )
+
+    assert "prepared" in result.transcript
+    assert "export READY=prepared" not in result.transcript
+
+
+def test_run_scripted_shell_pre_command_shares_cwd_and_env(tmp_path):
+    result = run_scripted_shell(
+        "pwd\nprintf '%s\\n' \"$READY\"",
+        workspace=tmp_path,
+        pre_command="mkdir -p notes\ncd notes\nexport READY=go",
+    )
+
+    assert str(tmp_path / "notes") in result.transcript
+    assert "go" in result.transcript
+
+
+def test_spawn_shell_process_keeps_norc_without_rcfile(tmp_path, monkeypatch):
+    captured = {}
+
+    class DummyProcess:
+        pass
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return DummyProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(pty, "openpty", lambda: (10, 11))
+    monkeypatch.setattr(os, "close", lambda fd: None)
+
+    spawn_shell_process(workspace=tmp_path)
+
+    assert captured["argv"] == ["/bin/bash", "--noprofile", "--norc", "-i"]
+
+
+def test_pre_command_rcfile_cleans_up_after_use():
+    with pre_command_rcfile("export READY=prepared") as path:
+        rcfile = Path(path)
+        assert rcfile.is_file()
+        assert rcfile.read_text() == "export READY=prepared\n"
+
+    assert rcfile.exists() is False
+
+
+def test_pre_command_rcfile_cleans_up_on_exception():
+    rcfile = None
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with pre_command_rcfile("export READY=prepared") as path:
+            rcfile = Path(path)
+            raise RuntimeError("boom")
+
+    assert rcfile is not None
+    assert rcfile.exists() is False
 @
 
 
@@ -769,14 +882,13 @@ def run_interactive_shell(
     shell: str = "/bin/bash",
     prompt_name: str = "tutorial",
     env: dict[str, str] | None = None,
+    pre_command: str | None = None,
 ) -> ShellResult:
     """Open an interactive PTY-backed shell in ``workspace``."""
 
     <<require a real TTY for the interactive shell>>
-    <<record interactive session start and spawn the shell>>
-    <<capture terminal state for relay>>
-    <<relay the interactive session in raw mode>>
-    <<restore the terminal and return the result>>
+    <<record interactive session start and choose shell context>>
+    <<run interactive session inside shell context>>
 @
 
 The interactive shell makes even stronger assumptions about the terminal
@@ -789,31 +901,38 @@ if not sys.stdin.isatty() or not sys.stdout.isatty():
 @
 
 As in the scripted path, we keep PTY-shell startup as a distinct phase so
-the relay code can assume the shell is already running.
+the relay code can assume the shell is already running.  The rcfile context
+again has to live for the whole session, because the interactive shell may not
+source the temporary file until just before the first prompt appears.
 
-<<record interactive session start and spawn the shell>>=
+<<record interactive session start and choose shell context>>=
 started_at = utc_now()
-master_fd, process = spawn_shell_process(
-    workspace=workspace,
-    shell=shell,
-    prompt_name=prompt_name,
-    env=env,
+context = (
+    pre_command_rcfile(pre_command)
+    if pre_command is not None
+    else nullcontext(None)
 )
 @
 
-Before we forward bytes, we snapshot the current terminal state.  That
-gives the relay phase freedom to switch into raw mode while still making
-restoration explicit and reliable.
+<<run interactive session inside shell context>>=
+with context as rcfile:
+    master_fd, process = spawn_shell_process(
+        workspace=workspace,
+        shell=shell,
+        prompt_name=prompt_name,
+        env=env,
+        rcfile=rcfile,
+    )
+    <<capture terminal state for relay>>
+    <<relay the interactive session in raw mode>>
+    <<restore the terminal and return the result>>
+@
 
 <<capture terminal state for relay>>=
 stdin_fd = sys.stdin.fileno()
 stdout_fd = sys.stdout.fileno()
 original_mode = termios.tcgetattr(stdin_fd)
 @
-
-The relay phase is where the session temporarily behaves like a normal
-interactive shell: raw mode lets control characters and line editing pass
-through unchanged while the helper forwards bytes in both directions.
 
 <<relay the interactive session in raw mode>>=
 try:
@@ -828,17 +947,14 @@ finally:
     termios.tcsetattr(stdin_fd, termios.TCSADRAIN, original_mode)
 @
 
-Once the relay ends, we close the PTY, wait for bash, and package the same
-kind of session summary returned by the other shell helpers.
-
 <<restore the terminal and return the result>>=
 os.close(master_fd)
-exit_status = process.wait()
+process.wait()
 ended_at = utc_now()
 return ShellResult(
     started_at=started_at,
     ended_at=ended_at,
-    exit_status=exit_status,
+    exit_status=process.returncode,
     transcript=transcript,
 )
 @
