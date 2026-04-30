@@ -73,7 +73,8 @@ The package surface is intentionally narrow and re-exported from
   iterates steps, invokes the shell/editor/select/input handler for each
   `step_kind`, gates author-supplied `pre_command` / `check_command` /
   `post_command` behind `--allow-shell`, and writes transcripts via the
-  state store.
+  state store. Standalone `tutorial run` defaults that flag off, while
+  embedded CLI helpers default it on for trusted bundled tutorials.
 - `cli.py` — Typer app exposing `tutorial list / run / review / install`,
   plus `create_app`, `add_typer_subcommand`, `add_argparse_subcommand` so
   the CLI can be embedded as a subcommand inside another Typer or

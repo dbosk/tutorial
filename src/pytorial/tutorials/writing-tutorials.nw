@@ -687,19 +687,21 @@ treatment of [[--restart]].
 
 ```tutorial-step
 required_patterns:
-  - tutorial run --tutorial-path my-tutorials greeting
+  - tutorial run --allow-shell --tutorial-path my-tutorials greeting
   - "greeting $"
   - "Step not complete yet: Say hello"
 hint: Start `greeting`, then leave its first shell with `exit`.
 ```
 
-Run `tutorial run --tutorial-path my-tutorials greeting`.
+Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
 
 This still tests a different aspect from `tutorial list --tutorial-path
 my-tutorials`. Listing only proves that the file parses and the tutorial is
 discoverable. Running it proves that the authored tutorial still starts
 with the expected shell backend even after you add editor and question
-steps later in the file.
+steps later in the file. By this point the tutorial also contains
+`pre_command`, `check_command`, and `post_command`, so standalone `run`
+must be told to trust those hooks explicitly.
 
 Keep the tutorial file itself invariant here. Only the command changes: you
 now move from inspecting tutorial metadata to exercising the authored
@@ -707,7 +709,7 @@ behaviour.
 
 For this step:
 
-1. Run `tutorial run --tutorial-path my-tutorials greeting`.
+1. Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
 2. When the nested shell opens with the `greeting $ ` prompt, type `exit`.
 3. The nested run should report `Step not complete yet: Say hello`.
 4. Exit this lesson's shell too so the transcript is recorded.
@@ -725,7 +727,7 @@ re-test one step.  The required patterns include the literal
 emitted a verdict at all --- the alternative (a [[PASS]]) would also
 satisfy a generic \enquote{step finished} check but would teach the
 learner less.  We also explicitly mention that [[develop]] enables
-shell code by default, with [[--deny-shell]] as the opt-out;
+shell code by default, with [[--no-allow-shell]] as the opt-out;
 this is the inverse default of [[run]] and is the kind of asymmetry
 that bites authors who do not know about it.
 
@@ -754,7 +756,7 @@ For this step:
 prints `PASS` or `FAIL`, and lets you edit and re-run that step without
 restarting the whole tutorial. We point at step `1` by number here, but the
 same command also accepts a regex that matches the step title. Develop also
-enables shell code by default; pass `--deny-shell` to turn it off for one
+enables shell code by default; pass `--no-allow-shell` to turn it off for one
 session.
 @
 
@@ -800,7 +802,7 @@ Run `tutorial list --tutorial-path my-tutorials` and
 At this point you have checked the same tutorial in three different ways:
 
 - `tutorial list --tutorial-path my-tutorials` shows that it loads
-- `tutorial run --tutorial-path my-tutorials greeting` shows that it runs
+- `tutorial run --allow-shell --tutorial-path my-tutorials greeting` shows that it runs
 - `cat my-tutorials/greeting.md` lets you inspect the final shell, editor,
   hook, shell-check, and question metadata directly
 @
