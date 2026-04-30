@@ -3632,7 +3632,51 @@ def develop_command(
         ),
     ] = True,
 ) -> None:
-    """Develop and test a single tutorial step."""
+    """Develop and test a single tutorial step.
+
+    \b
+    Tutorial-step fields (inside a ```tutorial-step``` block):
+
+    \b
+      Always available
+        hint              one-line message shown after a wrong answer.
+
+    \b
+      Shell steps (default -- no kind, no edit_file)
+        required_patterns transcript text the runner must match. Bare
+                          string = contains (whitespace-normalised);
+                          mapping {mode: contains|regex, pattern: ...}.
+        pre_command       shell setup run before the interactive shell.
+                          Requires --allow-shell.
+        check_command     shell verification, AND-ed with
+                          required_patterns. Runs in a fresh
+                          /bin/bash -lc with the workspace as cwd.
+                          Requires --allow-shell.
+        post_command      cleanup, runs only after the step passes.
+                          Requires --allow-shell.
+
+    \b
+      Editor steps (set edit_file)
+        edit_file         path opened in $EDITOR. Mutually exclusive
+                          with kind. required_patterns / pre_command /
+                          check_command / post_command also apply.
+
+    \b
+      Question steps (set kind, mutually exclusive with edit_file)
+        kind: input           free-text answer; answers uses the
+                              required_patterns format.
+        kind: single_select   one correct answer; options + answers
+                              (exact option text) required.
+        kind: multi_select    multiple correct answers; options +
+                              answers required.
+
+    \b
+    YAML front matter (top of the Markdown file): id, title, summary
+    (all required).
+
+    \b
+    YAML tip: use `|` for multi-line shell hooks; `>` would fold newlines.
+    """
 
     console = Console()
 
