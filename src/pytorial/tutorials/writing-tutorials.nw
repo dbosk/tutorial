@@ -728,8 +728,10 @@ emitted a verdict at all --- the alternative (a [[PASS]]) would also
 satisfy a generic \enquote{step finished} check but would teach the
 learner less.  We also explicitly mention that [[develop]] enables
 shell code by default, with [[--no-allow-shell]] as the opt-out;
-this is the inverse default of [[run]] and is the kind of asymmetry
-that bites authors who do not know about it.
+this is the inverse default of \emph{standalone} [[run]] (embedded
+hosts already default to allow, matching develop), and the asymmetry
+between develop and the standalone CLI authors actually use to test
+their tutorials is the kind that bites people who do not know about it.
 
 <<develop step>>=
 # Iterate on one step with `tutorial develop`
