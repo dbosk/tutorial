@@ -88,7 +88,7 @@ required_patterns:
   - mkdir my-tutorials
   - ls
   - my-tutorials
-hint: Create `my-tutorials`, then list the workspace.
+hint: "Make the directory the rest of the lesson will write into, then confirm it appeared in the listing."
 ```
 
 Create a directory named `my-tutorials`, then run `ls`.
@@ -120,6 +120,7 @@ required_patterns:
   - "summary: A tiny tutorial for saying hello."
   - "# Say hello"
   - echo hello
+hint: "Three required front-matter fields, then one heading-introduced step whose only line is a shell command --- the smallest tutorial that loads."
 ```
 
 Open `my-tutorials/greeting.md` and write this tutorial:
@@ -159,12 +160,13 @@ invariant breaks.
 
 ```tutorial-step
 required_patterns:
-  - tutorial list --tutorial-path my-tutorials
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+list\s+--tutorial-path\s+my-tutorials\b
   - greeting
-hint: Point the standalone CLI at `my-tutorials`.
+hint: "List the catalog, but tell it to look at your custom directory instead of only the built-ins."
 ```
 
-Run `tutorial list --tutorial-path my-tutorials`.
+Use the **list** verb with `--tutorial-path my-tutorials`.
 
 If the file parses, `greeting` should appear in the list.
 @
@@ -189,6 +191,7 @@ required_patterns:
   - "```tutorial-step"
   - "required_patterns:"
   - "  - echo hello"
+hint: "Insert a metadata fence above the instructions and add one bare-string rule that names the command in the step."
 ```
 
 Keep the same tutorial and the same step, but add a metadata fence before
@@ -236,6 +239,7 @@ required_patterns:
   - "required_patterns:"
   - "  - mode: regex"
   - '    pattern: (?m)echo hello(?:\s+)?$'
+hint: "Same step, same command --- only the rule changes from a bare string to a regex mapping with `mode` and `pattern` keys."
 ```
 
 Keep the same tutorial, the same step title, and the same command, but
@@ -283,6 +287,7 @@ required_patterns:
   - "required_patterns:"
   - "  - mode: regex"
   - "    pattern: (?m)^hello$"
+hint: "Different target this time: the regex anchors on the output line, not the typed command. Do not forget the multi-line flag."
 ```
 
 Keep the same tutorial file, the same step title, and the same
@@ -327,6 +332,7 @@ required_patterns:
   - "# Edit a note"
   - "edit_file: hello.txt"
   - hello from the editor
+hint: "Add a second top-level heading with `edit_file:` and a fragment of the saved text. No `kind` --- those two are mutually exclusive."
 ```
 
 Add this second step to the same file:
@@ -371,6 +377,7 @@ required_patterns:
   - "answers:"
   - "  - mode: regex"
   - "    pattern: (?i)hello(?:\\s+)?$"
+hint: "Switch the interaction with `kind: input` and reuse the same string-or-regex shape under `answers:`."
 ```
 
 Add this third step to the same file:
@@ -417,6 +424,7 @@ required_patterns:
   - "  - ls"
   - "answers:"
   - "  - echo hello"
+hint: "List the option labels under `options:` and the correct one --- by text, not number --- under `answers:`."
 ```
 
 Add this fourth step to the same file:
@@ -468,6 +476,7 @@ required_patterns:
   - "answers:"
   - "  - pwd"
   - "  - ls"
+hint: "Same shape as single-select, but more than one entry under `answers:`."
 ```
 
 Add this fifth step to the same file:
@@ -522,6 +531,7 @@ edit_file: my-tutorials/greeting.md
 required_patterns:
   - "check_command:"
   - 'test "$(cat hello.txt)" = "hello from the editor"'
+hint: "Add `check_command:` alongside the existing rules --- one line of shell that tests the saved file."
 ```
 
 Keep the same `# Edit a note` step, but add a filesystem-based shell check:
@@ -565,6 +575,7 @@ edit_file: my-tutorials/greeting.md
 required_patterns:
   - "pre_command: export GREETING_TARGET=world"
   - "echo hello \"$GREETING_TARGET\""
+hint: "Add `pre_command:` to set up an environment variable, then reference it in the step's command."
 ```
 
 Keep the same `# Say hello` step, but add hidden shell setup:
@@ -604,6 +615,7 @@ required_patterns:
   - "  mkdir -p setup"
   - "  cd setup"
   - "  printf 'world\\n' > target.txt"
+hint: "Use YAML `|` so all lines run as one bash process; one line should `cd`, another should write the file the command reads."
 ```
 
 Keep the same `# Say hello` step, but replace the single-line setup with this
@@ -643,6 +655,7 @@ to fix.
 edit_file: my-tutorials/greeting.md
 required_patterns:
   - "post_command: rm -f setup/target.txt"
+hint: "Cleanup runs only on success --- place it after the existing rules so the workspace stays inspectable on failure."
 ```
 
 Keep the same `# Say hello` step, but add cleanup after validation passes:
@@ -689,21 +702,23 @@ treatment of [[--restart]].
 
 ```tutorial-step
 required_patterns:
-  - tutorial run --allow-shell --tutorial-path my-tutorials greeting
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+run\s+--allow-shell\s+--tutorial-path\s+my-tutorials\s+greeting\b
   - "greeting $"
   - "Step not complete yet: Say hello"
-hint: Start `greeting`, then leave its first shell with `exit`.
+hint: "Run your authored tutorial, but the standalone CLI demands you trust the hooks you wrote. Leave the first step's shell before doing what it asks."
 ```
 
-Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
+Use the **run** verb with `--allow-shell --tutorial-path my-tutorials greeting`.
 
-This still tests a different aspect from `tutorial list --tutorial-path
-my-tutorials`. Listing only proves that the file parses and the tutorial is
-discoverable. Running it proves that the authored tutorial still starts
-with the expected shell backend even after you add editor and question
-steps later in the file. By this point the tutorial also contains
-`pre_command`, `check_command`, and `post_command`, so standalone `run`
-must be told to trust those hooks explicitly.
+This still tests a different aspect from the **list** verb with
+`--tutorial-path my-tutorials`. Listing only proves that the file
+parses and the tutorial is discoverable. Running it proves that the
+authored tutorial still starts with the expected shell backend even
+after you add editor and question steps later in the file. By this
+point the tutorial also contains `pre_command`, `check_command`, and
+`post_command`, so standalone `run` must be told to trust those hooks
+explicitly.
 
 Keep the tutorial file itself invariant here. Only the command changes: you
 now move from inspecting tutorial metadata to exercising the authored
@@ -711,7 +726,8 @@ behaviour.
 
 For this step:
 
-1. Run `tutorial run --allow-shell --tutorial-path my-tutorials greeting`.
+1. Start `greeting` with the **run** verb plus
+   `--allow-shell --tutorial-path my-tutorials`.
 2. When the nested shell opens with the `greeting $ ` prompt, type `exit`.
 3. The nested run should report `Step not complete yet: Say hello`.
 4. Exit this lesson's shell too so the transcript is recorded.
@@ -738,15 +754,16 @@ the refusal line stands in as the proof that the gate ran first.
 
 ```tutorial-step
 required_patterns:
-  - tutorial run --tutorial-path my-tutorials greeting
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+run\s+--tutorial-path\s+my-tutorials\s+greeting\b
   - Tutorial shell hooks and validation are disabled
-hint: Run the same command from step 15, but omit `--allow-shell`.
+hint: "Re-run the same target, but drop the trust flag and watch what happens before the shell even opens."
 ```
 
 Predict what changes when you drop `--allow-shell` from the run command
 you used in step 15.
 
-Run `tutorial run --tutorial-path my-tutorials greeting`.
+Use the same **run** invocation from step 15 without `--allow-shell`.
 
 Only the trust flag varies. The same tutorial file, the same target
 step, and the same nested-shell command from step 15 stay invariant.
@@ -785,28 +802,28 @@ their tutorials is the kind that bites people who do not know about it.
 
 ```tutorial-step
 required_patterns:
-  - tutorial develop --tutorial-path my-tutorials greeting 1
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+develop\s+--tutorial-path\s+my-tutorials\s+greeting\s+1\b
   - "greeting $"
   - "Verdict: FAIL"
-hint: Start develop for step 1, exit immediately, then keep the FAIL verdict and stop.
+hint: "Drive `develop` against step 1, exit immediately to force a verdict, accept it, then decline to iterate."
 ```
 
-Run `tutorial develop --tutorial-path my-tutorials greeting 1`.
+Use `develop` on step `1` with `--tutorial-path my-tutorials greeting`.
 
 For this step:
 
-1. Run `tutorial develop --tutorial-path my-tutorials greeting 1`.
+1. Start `develop` for step `1` with `--tutorial-path my-tutorials greeting`.
 2. When the temporary `greeting $ ` shell opens, type `exit` immediately.
-3. Answer yes when `tutorial develop` asks whether the `FAIL` verdict is
-   correct.
+3. Answer yes when `develop` asks whether the `FAIL` verdict is correct.
 4. Answer no when it asks whether to run the step again.
 
-`tutorial develop` exercises one authored step in a temporary workspace,
-prints `PASS` or `FAIL`, and lets you edit and re-run that step without
-restarting the whole tutorial. We point at step `1` by number here, but the
-same command also accepts a regex that matches the step title. Develop also
-enables shell code by default; pass `--no-allow-shell` to turn it off for one
-session.
+`develop` exercises one authored step in a temporary workspace, prints
+`PASS` or `FAIL`, and lets you edit and re-run that step without
+restarting the whole tutorial. We point at step `1` by number here,
+but the same command also accepts a regex that matches the step title.
+Develop also enables shell code by default; pass `--no-allow-shell` to
+turn it off for one session.
 @
 
 \section{Step 18: Inspect the finished tutorial}
@@ -830,7 +847,8 @@ its review step.
 
 ```tutorial-step
 required_patterns:
-  - tutorial list --tutorial-path my-tutorials
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+list\s+--tutorial-path\s+my-tutorials\b
   - greeting
   - cat my-tutorials/greeting.md
   - "    pattern: (?m)^hello$"
@@ -842,17 +860,19 @@ required_patterns:
   - 'check_command: test "$(cat hello.txt)" = "hello from the editor"'
   - "post_command: rm -f setup/target.txt"
   - "    pattern: (?i)hello(?:\\s+)?$"
-hint: List the tutorials, then display the file you wrote.
+hint: "Two views of the same artefact: what the catalog sees, and what is on disk."
 ```
 
-Run `tutorial list --tutorial-path my-tutorials` and
+Use the **list** verb with `--tutorial-path my-tutorials`, then run
 `cat my-tutorials/greeting.md`.
 
 At this point you have checked the same tutorial in four different ways:
 
-- `tutorial list --tutorial-path my-tutorials` shows that it loads
-- `tutorial run --allow-shell --tutorial-path my-tutorials greeting` shows that it runs once shell hooks are trusted
-- `tutorial run --tutorial-path my-tutorials greeting` (without `--allow-shell`) shows the standalone trust gate refusing untrusted hook code
+- `list --tutorial-path my-tutorials` shows that it loads
+- `run --allow-shell --tutorial-path my-tutorials greeting` shows that
+  it runs once shell hooks are trusted
+- `run --tutorial-path my-tutorials greeting` (without `--allow-shell`)
+  shows the standalone trust gate refusing untrusted hook code
 - `cat my-tutorials/greeting.md` lets you inspect the final shell, editor,
   hook, shell-check, and question metadata directly
 @
