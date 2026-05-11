@@ -76,17 +76,18 @@ detail surfaces, and it matters for users who script around the CLI.
 
 ```tutorial-step
 required_patterns:
-  - tutorial list
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+list\b
   - using-tutorials
   - shell-basics
   - writing-tutorials
-hint: Run `tutorial list`.
+hint: "One verb prints the catalog of installed tutorials --- its name says what it does."
 ```
 
-Run `tutorial list`.
+Use the **list** verb.
 
-In a terminal, `tutorial list` renders a readable table. When the same
-command is piped into a script, it switches to tab-separated rows.
+In a terminal, the **list** verb renders a readable table. When the
+same output is piped into a script, it switches to tab-separated rows.
 
 Its main job is to show which tutorials are available and how much
 progress is already saved for each one.
@@ -124,25 +125,27 @@ workflow.
 
 ```tutorial-step
 required_patterns:
-  - tutorial run --restart shell-basics
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+run\s+--restart\s+shell-basics\b
   - "shell-basics $"
   - "Step not complete yet: Inspect the workspace"
-hint: Start `shell-basics`, then leave its first shell with `exit`.
+hint: "Start `shell-basics` from scratch (one flag forces a clean run), then leave its first shell without doing what it asks."
 ```
 
-Run `tutorial run --restart shell-basics`.
+Use the **run** verb with `--restart` to start `shell-basics`.
 
-The `run` command starts or resumes saved work. We use `--restart` here so
-this step behaves the same way even if you have already finished
-`shell-basics` before. `--restart` discards every saved transcript for that
-tutorial, not just the step you are about to revisit.
+The **run** verb starts or resumes saved work. We use `--restart`
+here so this step behaves the same way even if you have already
+finished `shell-basics` before. `--restart` discards every saved
+transcript for that tutorial, not just the step you are about to
+revisit.
 
 Because this lesson is already running, the nested shell prompt changes to
 `shell-basics $ ` so you can tell which tutorial owns the current shell.
 
 For this step:
 
-1. Run `tutorial run --restart shell-basics`.
+1. Start `shell-basics` with the **run** verb and the `--restart` flag.
 2. When the nested shell opens, type `exit`.
 3. After the nested command reports that the step is not complete yet,
    exit this outer shell too.
@@ -170,7 +173,7 @@ required_patterns:
   - "using-tutorials $"
   - pwd
   - ls
-hint: First exit after `pwd`, then choose `try again` and run both commands.
+hint: "Two passes: feel the not-complete message after a partial attempt, then take the runner's retry offer and finish every command the step requires."
 ```
 
 Now return to this tutorial's own shell.
@@ -182,8 +185,8 @@ To feel how step validation works, try this step in two rounds:
 3. Choose `try again`, run both `pwd` and `ls`, then exit again.
 
 Only the latest recorded attempt counts. If you leave now and come back
-later, `tutorial run using-tutorials` resumes from the first unfinished
-step unless you restart it.
+later, the **run** verb resumes from the first unfinished step unless
+you restart it.
 @
 
 \section{Step 4: Capture the workflow in a file}
@@ -204,16 +207,17 @@ mistakenly inferring that the runner is shell-only.
 ```tutorial-step
 edit_file: tutorial-commands.txt
 required_patterns:
-  - tutorial list discovers tutorials
-  - tutorial run starts or resumes one
-  - tutorial review shows saved transcripts
+  - list discovers tutorials
+  - run starts or resumes one
+  - review shows saved transcripts
+hint: "Each line names one verb and what it is for --- focus on the role, not on how to spell the command."
 ```
 
 Open `tutorial-commands.txt` in your editor and add these three lines:
 
-- `tutorial list discovers tutorials`
-- `tutorial run starts or resumes one`
-- `tutorial review shows saved transcripts`
+- `list discovers tutorials`
+- `run starts or resumes one`
+- `review shows saved transcripts`
 
 Save the file and quit the editor.
 
@@ -225,13 +229,14 @@ finish the step.
 \section{Step 5: Answer a one-line question}
 
 This is the smallest question step possible: [[kind: input]] with a
-single regex answer.  The regex anchors on whitespace
-([[(?:\s+)?\$]]) so trailing spaces from terminal autocomplete do not
-fail the match.  We chose regex rather than a [[contains]] string for
-this introduction so the learner sees the more powerful answer mode
-first; the next two steps then \emph{contrast} with bare-string
-answers, which makes the difference between answer modes legible
-through variation rather than through direct explanation.
+single regex answer.  The regex accepts either bare [[tutorial]] /
+[[pytorial]] commands or a one-token host prefix followed by one of
+those names.  It still tolerates trailing whitespace so terminal
+autocomplete does not fail the match.  We chose regex rather than a
+[[contains]] string for this introduction so the learner sees the more
+powerful answer mode first; the next two steps then \emph{contrast}
+with bare-string answers, which makes the difference between answer
+modes legible through variation rather than through direct explanation.
 
 <<input question step>>=
 # Answer a one-line question
@@ -240,12 +245,11 @@ through variation rather than through direct explanation.
 kind: input
 answers:
   - mode: regex
-    pattern: ^tutorial\s+review\s+using-tutorials(?:\s+)?$
-hint: Type the full review command for this tutorial.
+    pattern: ^(\S+\s+)?(?:tutorial|pytorial)\s+review\s+using-tutorials\s*$
+hint: "Which verb reads saved transcripts? Pair it with the id of the tutorial you are inside right now."
 ```
 
-Type the exact command that reviews this tutorial:
-`tutorial review using-tutorials`.
+Type the exact command that reviews this tutorial.
 
 This is the smallest question step. The tutorial asks for one line of
 text, records it immediately, and validates it without opening a shell.
@@ -267,14 +271,15 @@ text form so authors do not have to track positions.
 ```tutorial-step
 kind: single_select
 options:
-  - tutorial list
-  - tutorial run
-  - tutorial review
+  - list
+  - run
+  - review
 answers:
-  - tutorial run
+  - run
+hint: "Look for the verb whose job is to begin or resume work, not to inspect it."
 ```
 
-Choose the command that starts or resumes one tutorial.
+Choose the verb that starts or resumes one tutorial.
 
 Single-select questions show numbered options. You can answer with the
 number or with the full option text.
@@ -297,17 +302,17 @@ read-versus-write semantics.
 ```tutorial-step
 kind: multi_select
 options:
-  - tutorial list
-  - tutorial run
-  - tutorial review
-  - tutorial install
+  - list
+  - run
+  - review
+  - install
 answers:
-  - tutorial list
-  - tutorial review
-hint: Choose the commands that only read tutorial definitions or saved state.
+  - list
+  - review
+hint: "Pick the verbs that only read --- they neither start a run nor mutate what is installed."
 ```
 
-Choose every tutorial command here that reads existing information without
+Choose every verb here that reads existing information without
 starting a run or installing anything.
 
 Multi-select questions also use literal option text. The learner may pick
@@ -335,16 +340,17 @@ fuse them into a single mental model.
 
 ```tutorial-step
 required_patterns:
-  - tutorial review using-tutorials
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+review\s+using-tutorials\b
   - Using Tutorials
   - "Step 1: List the available tutorials"
   - "Step 4: Capture the workflow in a file"
   - "Step 7: Pick every read-only tutorial command"
-  - tutorial review shows saved transcripts
-hint: Review `using-tutorials` from inside this shell.
+  - review shows saved transcripts
+hint: "Use the read-only verb on this very tutorial --- and stay inside the current shell so the run is still in progress when you read it back."
 ```
 
-Run `tutorial review using-tutorials`.
+Use the **review** verb on `using-tutorials`.
 
 Review reads the saved transcripts for the current run. Because this shell
 session is still in progress, the review output can show the earlier saved
@@ -353,10 +359,10 @@ step is recorded.
 
 At this point you have seen the main run-and-review workflow end to end:
 
-- `tutorial list` discovers what you can run
-- `tutorial run` starts or resumes one tutorial at a time
+- `list` discovers what you can run
+- `run` starts or resumes one tutorial at a time
 - question steps can ask for input, one choice, or several choices
-- `tutorial review` inspects the saved record afterwards
+- `review` inspects the saved record afterwards
 @
 
 \section{Step 9: Inspect one step of the saved run}
@@ -376,16 +382,17 @@ tutorial.
 
 ```tutorial-step
 required_patterns:
-  - tutorial review using-tutorials --step 1
+  - mode: regex
+    pattern: (?:^|\s)(?:tutorial|pytorial)\s+review\s+using-tutorials\s+--step\s+1\b
   - "Step 1: List the available tutorials"
-hint: Review only step 1 from inside this shell.
+hint: "One flag narrows the review to a single step; combine it with the right index."
 ```
 
-Run `tutorial review using-tutorials --step 1`.
+Use the **review** verb with `--step 1`.
 
 `--step N` narrows the review to one 1-indexed step instead of the whole
 run. Review normally shows the latest saved run for that tutorial; use
-`--run-id <id>` to pick an older one instead. `tutorial review --help`
+`--run-id <id>` to pick an older one instead. The help for **review**
 shows the full form.
 @
 
@@ -395,11 +402,12 @@ shows the full form.
 real --- running it would mutate the user's installed tutorial
 directory and pollute later [[tutorial list]] output, including
 output the same tutorial validates against.  The compromise is to
-make the step a [[kind: input]] question whose regex accepts any
-[[tutorial install <source>]] form, with optional [[--force]].  The
-learner types the command shape without it being run.  This still
-teaches the verb, the argument shape, and the [[--force]] override
-semantics, while keeping the rest of the tutorial reproducible.
+make the step a [[kind: input]] question whose regex accepts either
+the standalone names or a one-token host prefix, followed by
+[[install <source>]] with optional [[--force]].  The learner types
+the command shape without it being run.  This still teaches the verb,
+the argument shape, and the [[--force]] override semantics, while
+keeping the rest of the tutorial reproducible.
 
 <<install step>>=
 # Install a tutorial from a file or URL
@@ -408,16 +416,16 @@ semantics, while keeping the rest of the tutorial reproducible.
 kind: input
 answers:
   - mode: regex
-    pattern: ^tutorial\s+install\s+\S+(?:\s+--force)?\s*$
-hint: Type an install command with a file path or URL.
+    pattern: ^(\S+\s+)?(?:tutorial|pytorial)\s+install\s+\S+(?:\s+--force)?\s*$
+hint: "The install verb takes one positional source --- local path or URL --- with an optional override flag."
 ```
 
-Type a command such as `tutorial install ./lesson.md` or
-`tutorial install https://example.com/lesson.md --force`.
+Type an install invocation such as `install ./lesson.md` or
+`install <URL> --force`.
 
-`tutorial install <source>` copies a tutorial Markdown file into your
-installed tutorial directory so it appears in `tutorial list` alongside the
-built-ins. Add `--force` to overwrite an installed tutorial with the same
-`id`. This question step only records your answer, so you can practice the
-command safely without installing anything.
+The **install** verb copies a tutorial Markdown file into your
+installed tutorial directory so it appears in the catalog alongside the
+built-ins. Add `--force` to overwrite an installed tutorial with the
+same `id`. This question step only records your answer, so you can
+practice the command safely without installing anything.
 @
