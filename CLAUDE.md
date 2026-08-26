@@ -104,6 +104,21 @@ Repo-local example: `tutorials/shell-basics.md`.
 - Python ≥ 3.10 (uses `from __future__ import annotations`, `X | Y` types,
   PEP 604 unions). Poetry-managed; runtime deps are `platformdirs`,
   `PyYAML`, `rich`, `typer`.
+- Heavy dependencies are imported **at the point of use**, not at module
+  level: `rich`, `yaml`, `urllib.request`, `platformdirs`, `argparse`,
+  `tempfile`, `csv`, `json`, `hashlib`. Hosts embed the CLI as a
+  subcommand, so `import pytorial` runs on every invocation of the host,
+  and these are only needed once a tutorial command actually does
+  something. Each one has a named chunk (`<<import the YAML parser>>`)
+  referenced from the function bodies that use it; where only one branch
+  needs it, the reference goes inside that branch. Names used solely in
+  annotations (`Console`, `argparse`) go in a `TYPE_CHECKING` block, which
+  is safe because `from __future__ import annotations` leaves annotations
+  unevaluated — but it means `typing.get_type_hints()` on those functions
+  would raise `NameError`, so Typer command callbacks must keep to
+  `Annotated` and standard-library annotations. `tests/unit/test_import_cost.py`
+  (from `<<test [[import_cost.py]]>>` in `tutorial.nw`) enforces all of
+  this by probing a fresh subprocess.
 - Black target version is `py310`.
 - Bumping the package version: edit `version` in `pyproject.toml`; the
   top-level `Makefile` reads it for `gh release create`.
