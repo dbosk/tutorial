@@ -213,6 +213,40 @@ def test_adding_a_typer_subcommand_does_not_import_rich():
     assert offenders == []
 @
 
+Rich is the headline cost but not the only one.  Fetching a tutorial over
+HTTP pulls in the HTTP client, the TLS layer, and the email package behind
+the header parser, and nothing in a normal run of a host CLI needs any of
+it.  We name all three, since importing any one of them means the fetching
+stack came back.
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_the_url_fetcher():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name
+        for name in loaded
+        if name.split(".")[0] in {"http", "ssl"}
+        or name == "urllib.request"
+    )
+    assert offenders == []
+@
+
+YAML is the other one worth naming.  It is the format tutorial authors
+write in, so the parser is unavoidable once a tutorial file is read --- but
+reading a tutorial file is what [[list]] and [[run]] do, not what importing
+the package does.
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_the_yaml_parser():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name for name in loaded if name.split(".")[0] == "yaml"
+    )
+    assert offenders == []
+@
+
 The last probe guards the Markdown renderer on its own.  Rich imports its
 Markdown support lazily too, so a change that loaded [[rich.console]] at
 module level would fail the first test but might still leave the parser
