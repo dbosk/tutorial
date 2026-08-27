@@ -686,11 +686,11 @@ shell process.
 
 After ten steps of authoring, this step finally \emph{runs} the
 authored tutorial and tests a different invariant from step~3's
-[[tutorial list]] check.  Listing only proves that the file parses;
+[[pytorial list]] check.  Listing only proves that the file parses;
 running it proves that the first step still selects the shell backend
 even after the editor and question steps were added later in the file.
 Holding the tutorial file invariant here and varying only the command
-(from [[tutorial list]] to [[tutorial run]]) is the same separation
+(from [[pytorial list]] to [[pytorial run]]) is the same separation
 pattern step~5 used at the matching-mode level, applied now at the
 verb level.  The required pattern \enquote{Step not complete yet} is
 deliberate: the learner exits the nested shell early so the failing
@@ -779,9 +779,9 @@ running `tutorial run` inside that host sees the success path of step
 15 without adding any flag.
 @
 
-\section{Step 17: Iterate on one step with [[tutorial develop]]}
+\section{Step 17: Iterate on one step with [[pytorial develop]]}
 
-[[tutorial develop]] is the authoring counterpart to [[tutorial run]]:
+[[pytorial develop]] is the authoring counterpart to [[pytorial run]]:
 it exercises one step in a temporary workspace, prints a verdict, and
 asks whether to iterate.  We introduce it after the learner has run
 the authored tutorial because [[develop]] only makes sense once a
@@ -798,7 +798,7 @@ between develop and the standalone CLI authors actually use to test
 their tutorials is the kind that bites people who do not know about it.
 
 <<develop step>>=
-# Iterate on one step with `tutorial develop`
+# Iterate on one step with `pytorial develop`
 
 ```tutorial-step
 required_patterns:
@@ -836,7 +836,7 @@ sequence (regex pattern, three [[kind]] values, an [[edit_file]], the
 anchored regex).  Validating against
 all of them simultaneously proves the file accumulated correctly,
 without any earlier feature getting clobbered.  Pairing
-[[tutorial list --tutorial-path my-tutorials]] with
+[[pytorial list --tutorial-path my-tutorials]] with
 [[cat my-tutorials/greeting.md]] also lets the learner cross-check
 two views of the same artefact (loaded into the catalog vs raw on
 disk), which is the same dual-view pattern [[shell-basics]] uses in

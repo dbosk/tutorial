@@ -2,7 +2,7 @@
 \label{tutorial-cli}
 
 The command-line interface has two jobs.  It must expose the standalone
-[[tutorial]] command, and it must make that same functionality available
+[[pytorial]] command, and it must make that same functionality available
 to other CLIs that want tutorials as a subcommand.
 
 Typer is the primary interface because it keeps the standalone command
@@ -415,7 +415,7 @@ helper.
 <<functions>>=
 def build_runner(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
@@ -466,7 +466,7 @@ def effective_tutorial_paths(
 The standalone command and embedded hosts should not expose the same
 default catalog.
 
-The standalone [[tutorial]] command should feel ready to use on first
+The standalone [[pytorial]] command should feel ready to use on first
 launch, so it gets the full packaged sequence.  Embedded hosts are
 different: the host decides which application-specific tutorials to add,
 but the universal usage tutorial should still come first so students see
@@ -494,7 +494,32 @@ def user_tutorial_dir() -> Path:
     """Return the directory for user-installed tutorials."""
 
     <<import the platform directory helper>>
-    return (
+    tutorial_dir = (
+        platformdirs.user_data_path(
+            "pytorial",
+            appauthor=False,
+            ensure_exists=False,
+        )
+        / "tutorials"
+    )
+    <<adopt tutorials from the legacy [[tutorial]] data dir>>
+    return tutorial_dir
+@
+
+The project used to be called \enquote{tutorial}, so tutorials installed
+by an older version live under that appname's data directory.  We adopt
+that directory here, in the accessor, rather than in any one command:
+both [[list]] (through [[installed_tutorial_paths]]) and [[install]] go
+through this function, and whichever runs first must already see the old
+collection --- otherwise an early [[install]] would create the new
+directory and permanently shadow the legacy one.  The adoption mirrors
+the state store's: move rather than copy so there is one source of
+truth, and only when the new directory does not exist yet so newer
+installations are never clobbered.
+
+<<adopt tutorials from the legacy [[tutorial]] data dir>>=
+if not tutorial_dir.exists():
+    legacy_dir = (
         platformdirs.user_data_path(
             "tutorial",
             appauthor=False,
@@ -502,6 +527,40 @@ def user_tutorial_dir() -> Path:
         )
         / "tutorials"
     )
+    if legacy_dir.is_dir():
+        <<import the high-level file operations>>
+        tutorial_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_dir), str(tutorial_dir))
+@
+
+Moving a directory is [[shutil]]'s job, and like [[platformdirs]] it is
+only needed on this rarely taken branch, so it stays a point-of-use
+import.
+
+<<import the high-level file operations>>=
+import shutil
+@
+
+Let's verify that a legacy collection is adopted and that the old
+location is gone afterwards:
+
+<<test functions>>=
+def test_user_tutorial_dir_adopts_legacy_install_dir(tmp_path, monkeypatch):
+    import platformdirs
+
+    def fake_user_data_path(appname, appauthor=False, ensure_exists=False):
+        return tmp_path / appname
+
+    monkeypatch.setattr(platformdirs, "user_data_path", fake_user_data_path)
+    legacy_dir = tmp_path / "tutorial" / "tutorials"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "demo.md").write_text("# Demo\n")
+
+    tutorial_dir = user_tutorial_dir()
+
+    assert tutorial_dir == tmp_path / "pytorial" / "tutorials"
+    assert (tutorial_dir / "demo.md").exists()
+    assert not legacy_dir.exists()
 @
 
 <<functions>>=
@@ -597,7 +656,7 @@ without duplicating runner setup.
 <<functions>>=
 def build_command_runner(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     configured_tutorial_paths: tuple[str | Path, ...] = (),
     command_tutorial_paths: tuple[str | Path, ...] = (),
@@ -666,7 +725,7 @@ root never loads [[platformdirs]] at all.
 <<functions>>=
 def state_root_path(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
 ) -> Path:
     """Return the state root for one CLI host without creating it."""
@@ -676,7 +735,7 @@ def state_root_path(
     <<import the platform directory helper>>
     return (
         platformdirs.user_state_path(
-            "tutorial",
+            "pytorial",
             appauthor=False,
             ensure_exists=False,
         )
@@ -694,7 +753,7 @@ identifiers straight from the JSON files.
 <<functions>>=
 def saved_tutorial_ids(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
 ) -> tuple[str, ...]:
     """Return tutorial IDs that already have saved runs."""
@@ -724,7 +783,7 @@ import json
 def saved_run_ids(
     tutorial_id: str,
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
 ) -> tuple[str, ...]:
     """Return saved run IDs for ``tutorial_id``."""
@@ -817,7 +876,7 @@ def suggest_run_tutorial_ids(
 <<functions>>=
 def suggest_review_tutorial_ids(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     incomplete: str,
 ) -> list[str]:
@@ -836,7 +895,7 @@ def suggest_review_tutorial_ids(
 def suggest_review_run_ids(
     tutorial_id: str,
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     incomplete: str,
 ) -> list[str]:
@@ -1977,7 +2036,7 @@ def test_run_tutorial_with_menu_retries_until_success(tmp_path):
         ]
     )
 
-    def scripted_runner(*, workspace, prompt_name="tutorial"):
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -2039,7 +2098,7 @@ def test_run_tutorial_with_menu_can_exit_after_failed_step(tmp_path):
     tutorial_path = write_demo_tutorial(tmp_path)
     commands = iter(["pwd\n"])
 
-    def scripted_runner(*, workspace, prompt_name="tutorial"):
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -2369,7 +2428,7 @@ subcommand and emit the help text ourselves when nothing was selected.
 <<functions>>=
 def create_app(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     tutorial_path_provider: Callable[[], tuple[str | Path, ...]] | None = None,
@@ -2691,7 +2750,7 @@ wrapper around the shared app factory keeps that boundary explicit.
 <<functions>>=
 def create_standalone_app(
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     shell_runner: Callable[..., object] = run_interactive_shell,
     editor_runner: Callable[..., object] = run_editor,
@@ -2904,7 +2963,7 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
         ]
     )
 
-    def scripted_runner(*, workspace, prompt_name="tutorial"):
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -2951,7 +3010,7 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
 def test_standalone_run_denies_shell_hooks_by_default(tmp_path):
     tutorial_path = write_hook_tutorial(tmp_path)
 
-    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+    def scripted_runner(*, workspace, prompt_name="pytorial", pre_command=None):
         return run_scripted_shell(
             "printf '%s\\n' \"$READY\"\n",
             workspace=workspace,
@@ -2980,7 +3039,7 @@ def test_standalone_run_denies_shell_hooks_by_default(tmp_path):
 def test_standalone_run_allows_shell_hooks_with_allow_shell(tmp_path):
     tutorial_path = write_hook_tutorial(tmp_path)
 
-    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+    def scripted_runner(*, workspace, prompt_name="pytorial", pre_command=None):
         return run_scripted_shell(
             "printf '%s\\n' \"$READY\"\n",
             workspace=workspace,
@@ -3010,7 +3069,7 @@ def test_standalone_run_allows_shell_hooks_with_allow_shell(tmp_path):
 def test_standalone_run_no_allow_shell_blocks_hooks(tmp_path):
     tutorial_path = write_hook_tutorial(tmp_path)
 
-    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+    def scripted_runner(*, workspace, prompt_name="pytorial", pre_command=None):
         return run_scripted_shell(
             "printf '%s\\n' \"$READY\"\n",
             workspace=workspace,
@@ -3065,7 +3124,7 @@ def emit_run_summary(result: RunResult) -> None:
 
     typer.echo(
         f"Completed {result.tutorial.id}. Review it with "
-        f"`tutorial review {result.tutorial.id}`."
+        f"`pytorial review {result.tutorial.id}`."
     )
 @
 
@@ -3117,7 +3176,7 @@ def add_typer_subcommand(
     parent_app: typer.Typer,
     *,
     name: str = "tutorial",
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
@@ -3288,7 +3347,7 @@ def add_argparse_subcommand(
     subparsers: argparse._SubParsersAction,
     *,
     name: str = "tutorial",
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
     state_root: str | Path | None = None,
     tutorial_paths: tuple[str | Path, ...] = (),
     shell_runner: Callable[..., object] = run_interactive_shell,
@@ -3618,7 +3677,7 @@ def test_argparse_review_command_shows_saved_transcript(tmp_path, capsys):
             step=None,
             run_id=None,
         ),
-        namespace="tutorial",
+        namespace="pytorial",
         state_root=tmp_path / "state",
         tutorial_paths=(),
         shell_runner=run_scripted_shell,
@@ -3716,7 +3775,7 @@ def test_argparse_run_command_handles_question_steps(
         ]
     )
 
-    def scripted_runner(*, workspace, prompt_name="tutorial"):
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -3749,7 +3808,7 @@ def test_argparse_run_command_handles_question_steps(
             tutorial_id="shell-basics",
             restart=False,
         ),
-        namespace="tutorial",
+        namespace="pytorial",
         state_root=tmp_path / "state",
         tutorial_paths=(),
         shell_runner=scripted_runner,
@@ -4098,7 +4157,7 @@ def develop_command(
         )
 
     <<import the temporary directory helper>>
-    with tempfile.TemporaryDirectory(prefix="tutorial-develop-") as workspace:
+    with tempfile.TemporaryDirectory(prefix="pytorial-develop-") as workspace:
         workspace_path = Path(workspace)
 
         try:

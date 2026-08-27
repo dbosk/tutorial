@@ -1,4 +1,4 @@
-# Contributing to `tutorial`
+# Contributing to `pytorial`
 
 The project is organised as a literate-programming codebase. Committed
 sources live in `src/pytorial/*.nw`; `make` tangles them into the Python
@@ -20,12 +20,12 @@ The submodule provides the shared noweb and LaTeX build rules in
 make                    # tangle, build wheel, run tests, weave PDF
 make compile            # tangle Python and build the wheel
 make test               # run the tangled test suite
-make doc/tutorial.pdf   # weave the documentation PDF
+make doc/pytorial.pdf   # weave the documentation PDF
 make distclean          # remove build/, dist/, and *.egg-info
 ```
 
 To run the CLI from a clone without installing the wheel, use
-`poetry run tutorial …` in place of the bare `tutorial` invocations
+`poetry run pytorial …` in place of the bare `pytorial` invocations
 shown in [`README.md`](README.md).
 
 ## Repo layout

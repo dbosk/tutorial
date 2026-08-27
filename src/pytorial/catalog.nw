@@ -564,7 +564,7 @@ def test_load_tutorial_file_ignores_step_headings_inside_code_fences(tmp_path):
         "Run `echo hello`.\n"
         "````\n\n"
         "# Load the tutorial from disk\n\n"
-        "Run `tutorial list --tutorial-path my-tutorials`.\n"
+        "Run `pytorial list --tutorial-path my-tutorials`.\n"
     )
 
     tutorial = load_tutorial_file(tutorial_path)

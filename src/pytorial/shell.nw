@@ -164,7 +164,7 @@ polluting the transcript.
 def build_shell_environment(
     extra_env: dict[str, str] | None = None,
     *,
-    prompt_name: str = "tutorial",
+    prompt_name: str = "pytorial",
 ) -> dict[str, str]:
     """Return the environment used for tutorial shell sessions."""
 
@@ -510,7 +510,7 @@ def spawn_shell_process(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
-    prompt_name: str = "tutorial",
+    prompt_name: str = "pytorial",
     env: dict[str, str] | None = None,
     rcfile: str | None = None,
 ) -> tuple[int, subprocess.Popen]:
@@ -634,7 +634,7 @@ def run_scripted_shell(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
-    prompt_name: str = "tutorial",
+    prompt_name: str = "pytorial",
     env: dict[str, str] | None = None,
     pre_command: str | None = None,
 ) -> ShellResult:
@@ -880,7 +880,7 @@ def run_interactive_shell(
     *,
     workspace: str | Path,
     shell: str = "/bin/bash",
-    prompt_name: str = "tutorial",
+    prompt_name: str = "pytorial",
     env: dict[str, str] | None = None,
     pre_command: str | None = None,
 ) -> ShellResult:

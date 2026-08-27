@@ -7,7 +7,7 @@ SUBDIR+=		doc
 version=$(shell sed -n 's/^ *version *= *\"\([^\"]\+\)\"/\1/p' pyproject.toml)
 
 .PHONY: all
-all: compile doc/tutorial.pdf test
+all: compile doc/pytorial.pdf test
 
 .PHONY: compile
 compile:
@@ -18,7 +18,7 @@ compile:
 test: compile
 	${MAKE} -C tests test
 
-doc/tutorial.pdf:
+doc/pytorial.pdf:
 	${MAKE} -C $(dir $@) $(notdir $@)
 
 .PHONY: publish
@@ -29,9 +29,9 @@ publish-pypi: compile
 	poetry publish
 
 .PHONY: publish-github
-publish-github: doc/tutorial.pdf
+publish-github: doc/pytorial.pdf
 	git push
-	gh release create -t v${version} v${version} doc/tutorial.pdf
+	gh release create -t v${version} v${version} doc/pytorial.pdf
 
 
 .PHONY: clean

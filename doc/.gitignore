@@ -1,5 +1,5 @@
-tutorial.tex
-tutorial.pdf
+pytorial.tex
+pytorial.pdf
 ltxobj/
 *.aux
 *.fdb_latexmk

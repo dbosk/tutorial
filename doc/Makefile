@@ -1,11 +1,11 @@
 LATEXFLAGS += -shell-escape
 
 .PHONY: all weave clean distclean
-all: tutorial.pdf
+all: pytorial.pdf
 
-weave: tutorial.tex
+weave: pytorial.tex
 
-../src/pytorial/tutorial.tex: ../src/pytorial/tutorial.nw
+../src/pytorial/pytorial.tex: ../src/pytorial/pytorial.nw
 ../src/pytorial/catalog.tex: ../src/pytorial/catalog.nw
 ../src/pytorial/model.tex: ../src/pytorial/model.nw
 ../src/pytorial/state.tex: ../src/pytorial/state.nw
@@ -22,21 +22,21 @@ weave: tutorial.tex
 ../src/%.tex: ../src/%.nw
 	${MAKE} -C $(dir $@) $(notdir $@)
 
-tutorial.pdf: tutorial.tex
-tutorial.pdf: ../src/pytorial/tutorial.tex
-tutorial.pdf: ../src/pytorial/catalog.tex
-tutorial.pdf: ../src/pytorial/model.tex
-tutorial.pdf: ../src/pytorial/state.tex
-tutorial.pdf: ../src/pytorial/shell.tex
-tutorial.pdf: ../src/pytorial/run.tex
-tutorial.pdf: ../src/pytorial/cli.tex
-tutorial.pdf: ../src/pytorial/tutorials/using-tutorials.tex
-tutorial.pdf: ../src/pytorial/tutorials/writing-tutorials.tex
-tutorial.pdf: ../src/pytorial/tutorials/shell-basics.tex
-tutorial.pdf: abstract.tex preamble.tex
+pytorial.pdf: pytorial.tex
+pytorial.pdf: ../src/pytorial/pytorial.tex
+pytorial.pdf: ../src/pytorial/catalog.tex
+pytorial.pdf: ../src/pytorial/model.tex
+pytorial.pdf: ../src/pytorial/state.tex
+pytorial.pdf: ../src/pytorial/shell.tex
+pytorial.pdf: ../src/pytorial/run.tex
+pytorial.pdf: ../src/pytorial/cli.tex
+pytorial.pdf: ../src/pytorial/tutorials/using-tutorials.tex
+pytorial.pdf: ../src/pytorial/tutorials/writing-tutorials.tex
+pytorial.pdf: ../src/pytorial/tutorials/shell-basics.tex
+pytorial.pdf: abstract.tex preamble.tex
 
 clean:
-	${RM} tutorial.tex tutorial.pdf
+	${RM} pytorial.tex pytorial.pdf
 
 distclean:
 

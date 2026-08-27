@@ -1,6 +1,6 @@
 [project]
 name = "pytorial"
-version = "0.7"
+version = "0.8"
 description = "Interactive command-line tutorials with PTY-backed steps"
 license = "MIT"
 readme = "README.md"
@@ -30,8 +30,8 @@ tutorial = "pytorial.cli:app"
 pytorial = "pytorial.cli:app"
 
 [project.urls]
-repository = "https://github.com/dbosk/tutorial"
-"Bug Tracker" = "https://github.com/dbosk/tutorial/issues"
+repository = "https://github.com/dbosk/pytorial"
+"Bug Tracker" = "https://github.com/dbosk/pytorial/issues"
 
 [tool.poetry]
 packages = [{include = "pytorial", from = "src"}]
