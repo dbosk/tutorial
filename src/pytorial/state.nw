@@ -41,18 +41,20 @@ from pytorial.state import *
 We store plain JSON because the records are small and debugging a broken
 resume flow is easier when the file is readable with ordinary tools.
 
+Neither the JSON codec nor [[platformdirs]] appears in the list below.
+Both are only reached once a command actually touches saved state, and
+importing this module happens far more often than that ---
+\cref{tutorial-cli-deferred} explains why that gap is worth exploiting.
+
 <<imports>>=
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-
-import platformdirs
 
 from pytorial.model import StepTranscript
 from pytorial.model import Tutorial
@@ -122,6 +124,15 @@ Embedded use matters here.  A standalone [[tutorial]] command should not
 collide with a host application's built-in tutorials, so the store keeps
 one namespace directory per host.
 
+An explicit [[root_dir]] is the common case for embedded hosts and for the
+tests, and it answers the question without consulting the platform at all.
+Putting the import inside the other branch means only the runs that fall
+back to the platform default pay for the module that knows it.
+
+<<import the platform directory helper>>=
+import platformdirs
+@
+
 <<state store methods>>=
 def __init__(
     self,
@@ -132,6 +143,7 @@ def __init__(
     """Initialise a state store for one host namespace."""
 
     if root_dir is None:
+        <<import the platform directory helper>>
         base_dir = platformdirs.user_state_path(
             "tutorial",
             appauthor=False,
@@ -203,7 +215,13 @@ def test_workspace_path_is_nested_by_tutorial_and_run(tmp_path):
 
 \subsection{Loading stored runs}
 
-Missing state should behave like first use, not like an error.
+Missing state should behave like first use, not like an error.  The
+early return also keeps the JSON codec out of a first run, which by
+definition has nothing to decode.
+
+<<import the JSON codec>>=
+import json
+@
 
 <<state store methods>>=
 def load_runs(self, tutorial_id: str) -> list[TutorialRun]:
@@ -213,6 +231,7 @@ def load_runs(self, tutorial_id: str) -> list[TutorialRun]:
     if not path.exists():
         return []
 
+    <<import the JSON codec>>
     payload = json.loads(path.read_text())
     return [run_from_dict(item) for item in payload.get("runs", [])]
 @
@@ -234,6 +253,7 @@ the conversion layer small and makes the stored file easy to inspect.
 def save_runs(self, tutorial_id: str, runs: list[TutorialRun]) -> None:
     """Persist the given runs for ``tutorial_id``."""
 
+    <<import the JSON codec>>
     path = self.state_path(tutorial_id)
     payload = {
         "tutorial_id": tutorial_id,

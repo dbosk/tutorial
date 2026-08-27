@@ -48,13 +48,18 @@ The catalog layer combines three small tools:
   to parse the familiar front matter format.
 \end{description}
 
+Only [[pathlib]] is imported here.  The other two load at the point of use,
+for the reason \cref{tutorial-cli-deferred} sets out: hosts that embed the
+tutorial CLI pay this package's import cost on every invocation of the
+host, and [[yaml]] is among the more expensive things the package touches.
+Neither is needed in order to \emph{define} anything here --- both are
+called only from inside function bodies --- so both can wait until a
+tutorial file is actually read or written.
+
 <<imports>>=
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
-
-import yaml
 
 from pytorial.model import TextMatch
 from pytorial.model import Tutorial
@@ -362,10 +367,18 @@ The front matter must be a small YAML mapping.  We keep the schema narrow
 so mistakes fail fast and tutorial authors can see exactly what the file
 is expected to provide.
 
+This is also the first of the three places that need a YAML parser, so the
+chunk that loads one is defined here and referenced from the other two.
+
+<<import the YAML parser>>=
+import yaml
+@
+
 <<functions>>=
 def front_matter_mapping(front_matter: str) -> dict:
     """Return the parsed YAML mapping for one tutorial front matter block."""
 
+    <<import the YAML parser>>
     payload = yaml.safe_load(front_matter) or {}
     if not isinstance(payload, dict):
         raise ValueError("Tutorial front matter must be a YAML mapping.")
@@ -589,6 +602,7 @@ def step_metadata_and_instructions(section_body: str) -> tuple[dict, str]:
     if not lines or lines[0].strip() != STEP_METADATA_FENCE:
         return {}, stripped_body
 
+    <<import the YAML parser>>
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "```":
             metadata = yaml.safe_load("".join(lines[1:index])) or {}
@@ -1010,10 +1024,19 @@ Resuming an unfinished run only makes sense if the tutorial definition is
 still the same as when the run began.  A file digest gives the runner a
 small, stable identity check.
 
+Fingerprinting is the only thing in the package that hashes anything, and
+it happens once per loaded tutorial file, so the hash implementations load
+here rather than at module level.
+
+<<import the digest algorithm>>=
+import hashlib
+@
+
 <<functions>>=
 def build_source_digest(text: str) -> str:
     """Return a stable digest for one tutorial source file."""
 
+    <<import the digest algorithm>>
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 @
 
@@ -1319,6 +1342,7 @@ def serialize_tutorial_step(step: TutorialStep) -> str:
     parts = [f"# {step.title}", ""]
     metadata = step_metadata_for_serialization(step)
     if metadata:
+        <<import the YAML parser>>
         body = yaml.safe_dump(
             metadata,
             sort_keys=False,

@@ -91,3 +91,176 @@ def test_package_exports_cli_helpers():
     assert callable(add_typer_subcommand)
     assert callable(add_argparse_subcommand)
 @
+
+
+\section{Keeping the import cheap}
+
+The package surface is not only a discoverability decision, it is also a
+latency decision.  Host applications embed the CLI as a subcommand, so
+[[import pytorial]] runs on every invocation of the host, whether or not
+that invocation has anything to do with tutorials.  The CLI chapter
+therefore loads its heavy dependencies at the point where they are used
+rather than at module level (\cref{tutorial-cli}).
+
+That kind of arrangement decays quietly.  A future contributor adds one
+convenient module-level import, everything still works, and the cost
+returns without a single failing test.  The tests below are what make the
+decay loud: they assert not what the package \emph{does} but what it
+declines to load.
+
+<<test [[import_cost.py]]>>=
+"""Tests that keep ``import pytorial`` cheap."""
+
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+import pytorial
+
+<<import cost test functions>>
+@
+
+These tests cannot observe anything useful from inside the pytest process.
+By the time a test runs, pytest has imported its own plugins, this test
+module has imported [[pytorial]], and [[sys.modules]] holds a union of
+everything anybody needed --- Rich among it.  The only place where the
+question \enquote{what does this statement load?} has a meaningful answer
+is an interpreter that has just started.
+
+So each probe runs one statement in a fresh subprocess and reports the
+module names that interpreter ended up with.  The snapshot is taken before
+importing [[json]], so the reporting machinery cannot contaminate the
+answer it is reporting.
+
+We seed [[PYTHONPATH]] with the directory containing the package rather
+than trusting the subprocess to inherit an import path.  The suite runs
+against a working tree that may or may not be installed into the active
+environment, and deriving the path from the already-imported
+[[pytorial.__file__]] means the subprocess is guaranteed to import the same
+copy the test process did.
+
+<<import cost test functions>>=
+def imported_module_names(statement):
+    """Return the modules loaded by running `statement` in a new interpreter."""
+
+    probe = (
+        f"{statement}\n"
+        "import sys\n"
+        "loaded = sorted(sys.modules)\n"
+        "import json\n"
+        "print(json.dumps(loaded))\n"
+    )
+    package_root = pathlib.Path(pytorial.__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(package_root), env.get("PYTHONPATH")) if path
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return set(json.loads(completed.stdout))
+@
+
+The first probe is the headline claim: importing the package does not pull
+in Rich.  We collect every offending module name and assert on the sorted
+list rather than on a boolean, so a failure names the module that
+reintroduced the dependency instead of merely reporting [[False]].
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_rich():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name
+        for name in loaded
+        if name == "rich" or name.startswith("rich.")
+    )
+    assert offenders == []
+@
+
+Importing the package is the cheap case, though, and a lazy package surface
+could satisfy the first test while still loading Rich the moment a host
+touches anything.  The second probe closes that gap by exercising the call
+a host actually makes: registering the tutorial subcommand.  Registration
+builds the whole command tree, so if any command body reached Rich at
+definition time this would catch it.
+
+The probe passes no tutorial paths, which keeps it from reading the
+catalog; it measures registration alone.  Alongside Rich we name
+[[markdown_it]] and [[pygments]] explicitly, because those are the
+transitive costs that make Rich expensive, and a partial import that
+loaded them without loading [[rich]] itself would otherwise slip through.
+
+<<import cost test functions>>=
+def test_adding_a_typer_subcommand_does_not_import_rich():
+    loaded = imported_module_names(
+        "import typer, pytorial\n"
+        "pytorial.add_typer_subcommand(typer.Typer())"
+    )
+
+    offenders = sorted(
+        name
+        for name in loaded
+        if name.split(".")[0] in {"rich", "markdown_it", "pygments"}
+    )
+    assert offenders == []
+@
+
+Rich is the headline cost but not the only one.  Fetching a tutorial over
+HTTP pulls in the HTTP client, the TLS layer, and the email package behind
+the header parser, and nothing in a normal run of a host CLI needs any of
+it.  We name all three, since importing any one of them means the fetching
+stack came back.
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_the_url_fetcher():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name
+        for name in loaded
+        if name.split(".")[0] in {"http", "ssl"}
+        or name == "urllib.request"
+    )
+    assert offenders == []
+@
+
+YAML is the other one worth naming.  It is the format tutorial authors
+write in, so the parser is unavoidable once a tutorial file is read --- but
+reading a tutorial file is what [[list]] and [[run]] do, not what importing
+the package does.
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_the_yaml_parser():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name for name in loaded if name.split(".")[0] == "yaml"
+    )
+    assert offenders == []
+@
+
+The last probe guards the Markdown renderer on its own.  Rich imports its
+Markdown support lazily too, so a change that loaded [[rich.console]] at
+module level would fail the first test but might still leave the parser
+untouched; asserting on the parser separately keeps the two costs
+distinguishable when one of them regresses.
+
+<<import cost test functions>>=
+def test_importing_pytorial_does_not_import_the_markdown_renderer():
+    loaded = imported_module_names("import pytorial")
+
+    offenders = sorted(
+        name
+        for name in loaded
+        if name.split(".")[0] in {"markdown_it", "mdurl", "pygments"}
+    )
+    assert offenders == []
+@
