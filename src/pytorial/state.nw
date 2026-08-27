@@ -120,7 +120,7 @@ class StateStore:
 
 \subsection{Initialising the store}
 
-Embedded use matters here.  A standalone [[tutorial]] command should not
+Embedded use matters here.  A standalone [[pytorial]] command should not
 collide with a host application's built-in tutorials, so the store keeps
 one namespace directory per host.
 
@@ -138,18 +138,19 @@ def __init__(
     self,
     root_dir: str | Path | None = None,
     *,
-    namespace: str = "tutorial",
+    namespace: str = "pytorial",
 ):
     """Initialise a state store for one host namespace."""
 
     if root_dir is None:
         <<import the platform directory helper>>
         base_dir = platformdirs.user_state_path(
-            "tutorial",
+            "pytorial",
             appauthor=False,
             ensure_exists=True,
         )
         self.root_dir = Path(base_dir) / namespace
+        <<adopt state from the legacy [[tutorial]] paths>>
     else:
         self.root_dir = Path(root_dir)
 
@@ -158,6 +159,101 @@ def __init__(
     self.workspaces_dir = self.root_dir / "workspaces"
     self.runs_dir.mkdir(parents=True, exist_ok=True)
     self.workspaces_dir.mkdir(parents=True, exist_ok=True)
+@
+
+The project used to be called \enquote{tutorial}, so existing users have
+their run history under the old appname (for example
+\texttt{\~{}/.local/state/tutorial/} on Linux).  Renaming the appname
+without looking back would silently reset everyone's progress, which to
+the student looks like data loss.  We therefore adopt the legacy tree on
+first use: if the new root does not exist yet but the old one does, we
+move it into place.
+
+Moving --- rather than copying --- keeps a single source of truth, so a
+user who alternates between an old and a new installation cannot end up
+with two diverging histories.  Guarding on the new root's absence means
+we never clobber state that a new version has already written; once the
+new root exists, the legacy tree is dead weight and stays untouched.
+
+The old appname affected every namespace, not just the standalone
+default: an embedded host's state lived under
+\texttt{tutorial/\textit{host}}.  The standalone default namespace also
+changes its name (from [[tutorial]] to [[pytorial]]), so for that one
+namespace the legacy directory carries the old name at both levels.
+
+<<adopt state from the legacy [[tutorial]] paths>>=
+if not self.root_dir.exists():
+    legacy_namespace = "tutorial" if namespace == "pytorial" else namespace
+    legacy_root = Path(
+        platformdirs.user_state_path(
+            "tutorial",
+            appauthor=False,
+            ensure_exists=False,
+        )
+    ) / legacy_namespace
+    if legacy_root.is_dir():
+        <<import the high-level file operations>>
+        shutil.move(str(legacy_root), str(self.root_dir))
+@
+
+Like the platform helper itself, [[shutil]] only matters on this rarely
+taken branch, so it follows the deferred-import convention from
+\cref{tutorial-cli-deferred}.
+
+<<import the high-level file operations>>=
+import shutil
+@
+
+Let's verify that a legacy standalone tree is adopted, records intact,
+and that the old location is gone afterwards so the histories cannot
+diverge.  We stub out [[platformdirs]] to point both appnames into a
+temporary directory; the local import inside [[__init__]] resolves to
+the same module object, so the monkeypatch applies.
+
+<<test functions>>=
+def test_state_store_adopts_legacy_standalone_state(tmp_path, monkeypatch):
+    import platformdirs
+
+    def fake_user_state_path(appname, appauthor=False, ensure_exists=False):
+        path = tmp_path / appname
+        if ensure_exists:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(platformdirs, "user_state_path", fake_user_state_path)
+    legacy_runs = tmp_path / "tutorial" / "tutorial" / "runs"
+    legacy_runs.mkdir(parents=True)
+    (legacy_runs / "demo.json").write_text("{}")
+
+    store = StateStore()
+
+    assert store.root_dir == tmp_path / "pytorial" / "pytorial"
+    assert (store.runs_dir / "demo.json").exists()
+    assert not (tmp_path / "tutorial" / "tutorial").exists()
+@
+
+An embedded host keeps its own namespace name, so only the appname level
+moves for it:
+
+<<test functions>>=
+def test_state_store_adopts_legacy_host_state(tmp_path, monkeypatch):
+    import platformdirs
+
+    def fake_user_state_path(appname, appauthor=False, ensure_exists=False):
+        path = tmp_path / appname
+        if ensure_exists:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(platformdirs, "user_state_path", fake_user_state_path)
+    legacy_runs = tmp_path / "tutorial" / "myhost" / "runs"
+    legacy_runs.mkdir(parents=True)
+    (legacy_runs / "demo.json").write_text("{}")
+
+    store = StateStore(namespace="myhost")
+
+    assert store.root_dir == tmp_path / "pytorial" / "myhost"
+    assert (store.runs_dir / "demo.json").exists()
 @
 
 <<test functions>>=

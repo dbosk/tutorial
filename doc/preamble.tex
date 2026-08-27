@@ -1,11 +1,20 @@
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
 \usepackage[british]{babel}
 \usepackage{booktabs}
 
 \usepackage{noweb}
 \noweboptions{shift,breakcode,longxref,longchunks}
 
+\usepackage{minted}
 \usepackage[strict]{csquotes}
 \usepackage{fancyvrb}
 
 \usepackage[colorlinks]{hyperref}
 \usepackage[capitalize]{cleveref}
+
+\usepackage{newunicodechar}
+% LaTeX Error: Unicode character ┏ (U+250F)
+\newunicodechar{┏}{\texttt{\symbol{0x250F}}}
+% LaTeX Error: Unicode character │ (U+2502)
+\newunicodechar{│}{\texttt{\symbol{0x2502}}}

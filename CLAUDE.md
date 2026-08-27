@@ -11,10 +11,10 @@ matching `.nw` file and re-run `make compile`.
 
 Mapping:
 
-- `src/pytorial/<name>.py` ← `src/pytorial/<name>.nw` (chapters: `tutorial`, `model`, `catalog`, `state`, `shell`, `run`, `cli`)
+- `src/pytorial/<name>.py` ← `src/pytorial/<name>.nw` (chapters: `pytorial`, `model`, `catalog`, `state`, `shell`, `run`, `cli`; the `pytorial` chapter tangles to `__init__.py`)
 - `src/pytorial/tutorials/<name>.md` ← `src/pytorial/tutorials/<name>.nw`
 - `tests/unit/test_<name>.py` ← `<<test [[<name>.py]]>>` chunks inside `src/pytorial/*.nw` (tangled by `tests/Makefile`)
-- `doc/tutorial.pdf` ← `doc/tutorial.nw` + each chapter's woven `.tex`
+- `doc/pytorial.pdf` ← `doc/pytorial.nw` + each chapter's woven `.tex`
 
 The `literate-programming` skill must be activated before editing any `.nw`
 file.
@@ -35,7 +35,7 @@ The `makefiles/` submodule is required — without it the top-level
 make                      # tangle, build wheel, run tests, weave PDF (default goal)
 make compile              # tangle Python + build the wheel only
 make test                 # tangle test files, then poetry run pytest -v
-make doc/tutorial.pdf     # weave the documentation PDF
+make doc/pytorial.pdf     # weave the documentation PDF
 make distclean            # remove build/, dist/, *.egg-info
 ```
 
@@ -66,7 +66,9 @@ The package surface is intentionally narrow and re-exported from
   Loads Markdown tutorials with YAML front matter from the packaged
   `src/pytorial/tutorials/` and the user's installed tutorial directory.
 - `state.py` — `StateStore` / `ProgressState`. Persists per-tutorial run
-  progress and transcripts under `platformdirs` user state directory.
+  progress and transcripts under `platformdirs` user state directory
+  (appname `pytorial`; state and installed tutorials under the legacy
+  `tutorial` appname are adopted — moved — on first use).
 - `shell.py` — `run_interactive_shell` / `run_scripted_shell`. PTY-backed
   step execution; this is what makes the tutorials "interactive".
 - `run.py` — `TutorialRunner`, `RunResult`. Orchestrates one tutorial:
@@ -78,7 +80,11 @@ The package surface is intentionally narrow and re-exported from
 - `cli.py` — Typer app exposing `tutorial list / run / review / install`,
   plus `create_app`, `add_typer_subcommand`, `add_argparse_subcommand` so
   the CLI can be embedded as a subcommand inside another Typer or
-  argparse application.
+  argparse application. The console script is `pytorial` with `tutorial`
+  kept as an alias; the embedded subcommand default name stays
+  `tutorial`. User-facing command examples (README, lessons, CLI
+  messages) use the `tutorial` alias, because that spelling is the same
+  standalone and embedded.
 
 Embedded hosts (`add_typer_subcommand` / `add_argparse_subcommand`)
 prepend the `using-tutorials` lesson before host-specific tutorials, do
@@ -117,7 +123,7 @@ Repo-local example: `tutorials/shell-basics.md`.
   unevaluated — but it means `typing.get_type_hints()` on those functions
   would raise `NameError`, so Typer command callbacks must keep to
   `Annotated` and standard-library annotations. `tests/unit/test_import_cost.py`
-  (from `<<test [[import_cost.py]]>>` in `tutorial.nw`) enforces all of
+  (from `<<test [[import_cost.py]]>>` in `pytorial.nw`) enforces all of
   this by probing a fresh subprocess.
 - Black target version is `py310`.
 - Bumping the package version: edit `version` in `pyproject.toml`; the

@@ -22,6 +22,11 @@ self-guided tour of the tool itself:
 tutorial run using-tutorials
 ```
 
+The command is installed both as `pytorial` and as the alias
+`tutorial`. The examples use `tutorial` because the same spelling also
+works when the CLI is embedded as a `tutorial` subcommand inside a
+host application.
+
 Companion tours: `tutorial run shell-basics` (shell and editor skills)
 and `tutorial run writing-tutorials` (authoring tutorials of your own).
 

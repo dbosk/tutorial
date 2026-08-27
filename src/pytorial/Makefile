@@ -1,6 +1,6 @@
 NOTANGLEFLAGS.py=
 
-MODULES+=	__init__.py tutorial.tex
+MODULES+=	__init__.py pytorial.tex
 MODULES+=	catalog.py catalog.tex
 MODULES+=	model.py model.tex
 MODULES+=	state.py state.tex
@@ -12,7 +12,7 @@ MODULES+=	cli.py cli.tex
 all: ${MODULES}
 	${MAKE} -C tutorials all
 
-__init__.py: tutorial.nw
+__init__.py: pytorial.nw
 	${NOTANGLE.py}
 
 catalog.py: catalog.nw

@@ -5,7 +5,7 @@
 
 \input{preamble.tex}
 
-\title{tutorial: Interactive Command-Line Tutorials}
+\title{pytorial: Interactive Command-Line Tutorials}
 \author{Daniel Bosk}
 \date{\today}
 
@@ -45,7 +45,7 @@ is then explained against this user-facing baseline.
 \part{Implementation}
 \label{part:implementation}
 
-\input{../src/pytorial/tutorial.tex}
+\input{../src/pytorial/pytorial.tex}
 \input{../src/pytorial/catalog.tex}
 \input{../src/pytorial/model.tex}
 \input{../src/pytorial/state.tex}

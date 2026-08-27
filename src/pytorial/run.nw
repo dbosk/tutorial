@@ -682,7 +682,7 @@ def test_runner_completes_shell_basics_with_mixed_backends(tmp_path):
     )
     answers = iter(["pwd", "ls", "pwd\nls"])
 
-    def scripted_runner(*, workspace, prompt_name="tutorial"):
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -729,7 +729,7 @@ def test_runner_resumes_unfinished_run(tmp_path):
     store = StateStore(tmp_path / "state")
     first_commands = iter(["pwd\n"])
 
-    def first_runner(*, workspace, prompt_name="tutorial"):
+    def first_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(first_commands),
             workspace=workspace,
@@ -756,7 +756,7 @@ def test_runner_resumes_unfinished_run(tmp_path):
     )
     second_answers = iter(["pwd", "ls", "pwd\nls"])
 
-    def second_runner(*, workspace, prompt_name="tutorial"):
+    def second_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(second_commands),
             workspace=workspace,
@@ -800,7 +800,7 @@ def test_runner_restart_creates_new_run(tmp_path):
     store = StateStore(tmp_path / "state")
     commands = iter(["pwd\n"])
 
-    def first_runner(*, workspace, prompt_name="tutorial"):
+    def first_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(commands),
             workspace=workspace,
@@ -817,7 +817,7 @@ def test_runner_restart_creates_new_run(tmp_path):
     restart_commands = iter(["pwd\n"])
     restart_answers = iter(["pwd", "ls", "pwd\nls"])
 
-    def restart_runner(*, workspace, prompt_name="tutorial"):
+    def restart_runner(*, workspace, prompt_name="pytorial"):
         return run_scripted_shell(
             next(restart_commands),
             workspace=workspace,
@@ -879,7 +879,7 @@ Print `$READY`.
 """
     )
 
-    def scripted_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+    def scripted_runner(*, workspace, prompt_name="pytorial", pre_command=None):
         return run_scripted_shell(
             "printf '%s\\n' \"$READY\"\n",
             workspace=workspace,
@@ -1252,7 +1252,7 @@ def run_step_shell(
 def test_run_step_shell_passes_prompt_name_when_supported(tmp_path):
     calls = []
 
-    def prompt_aware_runner(*, workspace, prompt_name="tutorial"):
+    def prompt_aware_runner(*, workspace, prompt_name="pytorial"):
         calls.append((workspace, prompt_name))
         return ShellResult(
             started_at="2026-01-01T00:00:00+00:00",
@@ -1296,7 +1296,7 @@ def test_run_step_shell_keeps_legacy_runners_compatible(tmp_path):
 def test_run_step_shell_passes_pre_command_when_supported(tmp_path):
     calls = []
 
-    def hook_aware_runner(*, workspace, prompt_name="tutorial", pre_command=None):
+    def hook_aware_runner(*, workspace, prompt_name="pytorial", pre_command=None):
         calls.append((workspace, prompt_name, pre_command))
         return ShellResult(
             started_at="2026-01-01T00:00:00+00:00",

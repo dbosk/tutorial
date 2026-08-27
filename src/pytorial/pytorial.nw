@@ -40,7 +40,7 @@ __all__ = [
 ]
 @
 
-<<test [[tutorial.py]]>>=
+<<test [[pytorial.py]]>>=
 """Tests for the public package exports."""
 
 from pytorial import *
