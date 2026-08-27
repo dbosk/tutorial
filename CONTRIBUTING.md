@@ -25,7 +25,7 @@ make distclean          # remove build/, dist/, and *.egg-info
 ```
 
 To run the CLI from a clone without installing the wheel, use
-`poetry run pytorial …` in place of the bare `pytorial` invocations
+`poetry run tutorial …` in place of the bare `tutorial` invocations
 shown in [`README.md`](README.md).
 
 ## Repo layout

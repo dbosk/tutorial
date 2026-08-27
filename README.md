@@ -19,19 +19,21 @@ The package ships with three built-in tutorials. The first one is a
 self-guided tour of the tool itself:
 
 ```
-pytorial run using-tutorials
+tutorial run using-tutorials
 ```
 
-The command is also installed under the alias `tutorial`, so
-`tutorial run using-tutorials` works too.
+The command is installed both as `pytorial` and as the alias
+`tutorial`. The examples use `tutorial` because the same spelling also
+works when the CLI is embedded as a `tutorial` subcommand inside a
+host application.
 
-Companion tours: `pytorial run shell-basics` (shell and editor skills)
-and `pytorial run writing-tutorials` (authoring tutorials of your own).
+Companion tours: `tutorial run shell-basics` (shell and editor skills)
+and `tutorial run writing-tutorials` (authoring tutorials of your own).
 
 ### Discover what's available
 
 ```
-pytorial list
+tutorial list
 ```
 
 Pipe the same command into a script to get tab-separated rows instead
@@ -40,22 +42,22 @@ of the rich table.
 ### Run or resume
 
 ```
-pytorial run <id>              # start or resume saved progress
-pytorial run --restart <id>    # discard saved progress and start over
+tutorial run <id>              # start or resume saved progress
+tutorial run --restart <id>    # discard saved progress and start over
 ```
 
 ### Review past runs
 
 ```
-pytorial review <id>
-pytorial review <id> --step 2
-pytorial review <id> --run-id <run-id>
+tutorial review <id>
+tutorial review <id> --step 2
+tutorial review <id> --run-id <run-id>
 ```
 
 ### Trust author-supplied shell code
 
 ```
-pytorial run --allow-shell <id>
+tutorial run --allow-shell <id>
 ```
 
 A tutorial step may declare `pre_command`, `check_command`, or
@@ -67,7 +69,7 @@ opt-in: pass `--allow-shell` only when you trust the tutorial author.
 Take the interactive walkthrough first:
 
 ```
-pytorial run writing-tutorials
+tutorial run writing-tutorials
 ```
 
 ### File format
@@ -78,7 +80,7 @@ A tutorial is a single Markdown file beginning with YAML front matter:
 ---
 id: my-tutorial
 title: My Tutorial
-summary: One-line description shown by `pytorial list`.
+summary: One-line description shown by `tutorial list`.
 ---
 
 # First step
@@ -119,9 +121,9 @@ Install a tutorial Markdown file or URL into the user's tutorial
 directory:
 
 ```
-pytorial install path/to/tutorial.md
-pytorial install https://example.com/tutorial.md
-pytorial install --force path/to/tutorial.md
+tutorial install path/to/tutorial.md
+tutorial install https://example.com/tutorial.md
+tutorial install --force path/to/tutorial.md
 ```
 
 Use `--force` to overwrite an installed tutorial with the same `id`.
@@ -134,8 +136,8 @@ To use a tutorial without installing it, point at the file or directory
 on the command line:
 
 ```
-pytorial list --tutorial-path some/dir
-pytorial run --tutorial-path some/dir <id>
+tutorial list --tutorial-path some/dir
+tutorial run --tutorial-path some/dir <id>
 ```
 
 `--tutorial-path` may be repeated and is appended after the built-ins.

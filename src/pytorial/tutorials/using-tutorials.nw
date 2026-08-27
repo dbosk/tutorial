@@ -61,7 +61,7 @@ summary: Learn how list, run, question prompts, and review fit together.
 
 \section{Step 1: List the available tutorials}
 
-We open with [[pytorial list]] because it is the only command a learner
+We open with [[tutorial list]] because it is the only command a learner
 can run before anything else exists --- it has no required arguments
 and produces output even on a fresh install.  The required patterns
 include the names of all three built-ins; this turns the validator into
@@ -288,9 +288,9 @@ number or with the full option text.
 \section{Step 7: Pick every read-only tutorial command}
 
 [[multi_select]] generalises [[single_select]] to multiple correct
-options.  We deliberately include [[pytorial install]] as the
+options.  We deliberately include [[tutorial install]] as the
 distractor: a learner who has not internalised \enquote{which commands
-read versus write?} might pick it because it shares the [[pytorial]]
+read versus write?} might pick it because it shares the [[tutorial]]
 prefix.  The framing question (\enquote{commands that only read}) is
 the conceptual axis the step is testing, and the [[hint]] re-states
 the axis explicitly because the option labels alone do not signal
@@ -322,7 +322,7 @@ authored answer list.
 
 \section{Step 8: Review the saved run}
 
-This step is the first time [[pytorial review]] appears, and it does
+This step is the first time [[tutorial review]] appears, and it does
 double duty: the learner runs the command, and the [[required_patterns]]
 list verifies that the review output covers earlier steps the learner
 has already finished.  We list specific step headings (\enquote{Step 1:
@@ -400,7 +400,7 @@ shows the full form.
 
 [[install]] is the only verb a linear tutorial cannot exercise for
 real --- running it would mutate the user's installed tutorial
-directory and pollute later [[pytorial list]] output, including
+directory and pollute later [[tutorial list]] output, including
 output the same tutorial validates against.  The compromise is to
 make the step a [[kind: input]] question whose regex accepts either
 the standalone names or a one-token host prefix, followed by

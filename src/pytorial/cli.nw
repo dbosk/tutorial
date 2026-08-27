@@ -3124,7 +3124,7 @@ def emit_run_summary(result: RunResult) -> None:
 
     typer.echo(
         f"Completed {result.tutorial.id}. Review it with "
-        f"`pytorial review {result.tutorial.id}`."
+        f"`tutorial review {result.tutorial.id}`."
     )
 @
 

@@ -52,7 +52,7 @@ chunk and running `make test` is the canonical loop.
 Run the CLI from the clone (without installing the wheel):
 
 ```
-poetry run pytorial run using-tutorials
+poetry run tutorial run using-tutorials
 ```
 
 ## Architecture (big picture)
@@ -77,12 +77,14 @@ The package surface is intentionally narrow and re-exported from
   `post_command` behind `--allow-shell`, and writes transcripts via the
   state store. Standalone `tutorial run` defaults that flag off, while
   embedded CLI helpers default it on for trusted bundled tutorials.
-- `cli.py` — Typer app exposing `pytorial list / run / review / install`,
+- `cli.py` — Typer app exposing `tutorial list / run / review / install`,
   plus `create_app`, `add_typer_subcommand`, `add_argparse_subcommand` so
   the CLI can be embedded as a subcommand inside another Typer or
   argparse application. The console script is `pytorial` with `tutorial`
   kept as an alias; the embedded subcommand default name stays
-  `tutorial`.
+  `tutorial`. User-facing command examples (README, lessons, CLI
+  messages) use the `tutorial` alias, because that spelling is the same
+  standalone and embedded.
 
 Embedded hosts (`add_typer_subcommand` / `add_argparse_subcommand`)
 prepend the `using-tutorials` lesson before host-specific tutorials, do
