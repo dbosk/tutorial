@@ -13,10 +13,16 @@ student worked through the tutorial.
 
 \section{Code overview}
 
+Constants come before the classes because a dataclass evaluates its field
+defaults when the class object is created, so any constant used as a
+default must already exist at that point.
+
 <<[[model.py]]>>=
 """Tutorial models shared by the loader, runner, and CLI."""
 
 <<imports>>
+
+<<constants>>
 
 <<classes>>
 <<functions>>
@@ -219,6 +225,37 @@ We also keep a small amount of source metadata.  That metadata lets the
 runner detect when an unfinished tutorial changed on disk and refuse to
 resume a run against a different definition.
 
+\subsection{Choosing where a run happens}
+
+Most tutorials are practice, and practice wants a sandbox: each run gets
+a directory of its own so a student can break things freely.  Some
+tutorials are the opposite.  They scaffold a workflow the reader performs
+in a project they already have, but rarely enough to want the steps in
+front of them---cutting a release, bootstrapping a repository, rotating a
+key.  For those a sandbox is not merely unhelpful, it defeats the
+purpose: the steps must touch the real files.
+
+We record that choice as a small mode string rather than a boolean.  A
+boolean would name only the exception and leave the rule anonymous, and
+it would fix the vocabulary at two values forever.  The string names both
+cases in the front matter the author writes, and it leaves room for a
+third placement rule later---a configured project directory, say---without
+changing the field's type.  This is the same reasoning that made [[kind]]
+a string on [[TutorialStep]] instead of a pair of flags.
+
+<<constants>>=
+WORKSPACE_FRESH = "fresh"
+WORKSPACE_CWD = "cwd"
+WORKSPACE_MODES = (WORKSPACE_FRESH, WORKSPACE_CWD)
+@
+
+\subsection{Collecting one tutorial definition}
+
+The authored fields come first and the derived source metadata last, so a
+reader sees the front matter the author wrote before the bookkeeping the
+loader added.  The workspace mode defaults to the sandbox because every
+tutorial written before the mode existed expects one.
+
 <<classes>>=
 @dataclass(frozen=True)
 class Tutorial:
@@ -228,6 +265,7 @@ class Tutorial:
     title: str
     summary: str
     steps: tuple[TutorialStep, ...]
+    workspace: str = WORKSPACE_FRESH
     source_path: str | None = None
     source_digest: str | None = None
 @
@@ -246,6 +284,48 @@ def test_tutorial_groups_steps_under_stable_id():
     assert tutorial.id == "demo"
     assert tutorial.steps[0].title == "One"
     assert tutorial.source_digest == "digest"
+
+
+def test_tutorial_defaults_to_a_fresh_workspace():
+    tutorial = Tutorial(
+        id="demo",
+        title="Demo",
+        summary="A short tutorial.",
+        steps=(TutorialStep(title="One", instructions="Do it."),),
+    )
+
+    assert tutorial.workspace == "fresh"
+@
+
+\subsection{Resolving where the run happens}
+
+The runner and the CLI both need this answer---one to pick a directory,
+the other to announce it---and neither should have to know that the
+[[cwd]] spelling is the one that means \enquote{in place}.  Keeping the
+comparison here, next to the dataclass it reads, mirrors [[step_kind]]:
+a later mode is then added in one file rather than three.
+
+<<functions>>=
+def runs_in_place(tutorial: Tutorial) -> bool:
+    """Return whether ``tutorial`` runs in the caller's current directory."""
+
+    return tutorial.workspace == WORKSPACE_CWD
+@
+
+<<test functions>>=
+def test_runs_in_place_recognises_cwd_tutorials():
+    steps = (TutorialStep(title="One", instructions="Do it."),)
+    fresh = Tutorial(id="demo", title="Demo", summary="Practice.", steps=steps)
+    in_place = Tutorial(
+        id="release",
+        title="Release",
+        summary="Scaffold a release.",
+        steps=steps,
+        workspace="cwd",
+    )
+
+    assert runs_in_place(fresh) is False
+    assert runs_in_place(in_place) is True
 @
 
 
