@@ -63,6 +63,9 @@ tutorial run --allow-shell <id>
 A tutorial step may declare `pre_command`, `check_command`, or
 `post_command`. Those fields run author-supplied shell code, so they are
 opt-in: pass `--allow-shell` only when you trust the tutorial author.
+A `workspace: cwd` tutorial combined with `--allow-shell` runs that
+shell code in your real project directory rather than in a per-run
+workspace, so pass both only for tutorials you wrote or trust completely.
 
 ## Writing tutorials
 
@@ -95,6 +98,8 @@ Step body in Markdown.
 ````
 
 - Required front-matter fields: `id`, `title`, `summary`.
+- Optional front-matter field: `workspace`, either `fresh` (default) or
+  `cwd`. See "Run in your project directory" below.
 - Each top-level `# Heading` becomes one step.
 - A step may begin with a fenced `tutorial-step` YAML block. Recognised
   fields are `required_patterns`, `pre_command`, `check_command`,
@@ -114,6 +119,34 @@ Step body in Markdown.
   `cd`, `export`, and shell options across lines.
 - Do not use YAML `>` for shell fields: it folds newlines into spaces and
   can break shell syntax.
+
+### Run in your project directory
+
+A tutorial that scaffolds a workflow in a real project, such as cutting
+a release or bootstrapping a repository, can ask to run where the reader
+launched it instead of in a fresh per-run workspace:
+
+```markdown
+---
+id: release-checklist
+title: Release Checklist
+summary: Walk through a release in this project.
+workspace: cwd
+---
+```
+
+- The CLI prints one line naming the directory before the first step.
+- Progress is tracked per directory: `run`, `--restart`, and `list` act
+  on the run recorded in the current directory, so the same tutorial in
+  two projects keeps two independent runs. Re-enter the same directory
+  to resume. `review` still shows the latest run overall; use `--run-id`
+  to pick another.
+- `--restart` does not clear the directory, so files left by an earlier
+  run are still there. Prefer non-destructive `post_command` cleanup in
+  these tutorials.
+- `tutorial develop` always uses a temporary workspace. Test an in-place
+  tutorial with `tutorial run --restart` inside a scratch copy of a
+  project.
 
 ### Share and install
 

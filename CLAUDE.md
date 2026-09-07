@@ -68,7 +68,9 @@ The package surface is intentionally narrow and re-exported from
 - `state.py` — `StateStore` / `ProgressState`. Persists per-tutorial run
   progress and transcripts under `platformdirs` user state directory
   (appname `pytorial`; state and installed tutorials under the legacy
-  `tutorial` appname are adopted — moved — on first use).
+  `tutorial` appname are adopted — moved — on first use). `start_run` /
+  `latest_run` take an optional explicit workspace; the store never reads
+  the process cwd itself.
 - `shell.py` — `run_interactive_shell` / `run_scripted_shell`. PTY-backed
   step execution; this is what makes the tutorials "interactive".
 - `run.py` — `TutorialRunner`, `RunResult`. Orchestrates one tutorial:
@@ -77,6 +79,9 @@ The package surface is intentionally narrow and re-exported from
   `post_command` behind `--allow-shell`, and writes transcripts via the
   state store. Standalone `tutorial run` defaults that flag off, while
   embedded CLI helpers default it on for trusted bundled tutorials.
+  `workspace_for_run` / `current_run` implement per-directory runs for
+  `workspace: cwd` tutorials (resume, `list`, `progress` are scoped to
+  the cwd; `review` is not).
 - `cli.py` — Typer app exposing `tutorial list / run / review / install`,
   plus `create_app`, `add_typer_subcommand`, `add_argparse_subcommand` so
   the CLI can be embedded as a subcommand inside another Typer or
@@ -94,8 +99,11 @@ standalone-only `install` command.
 ## Tutorial format (authoring)
 
 A tutorial is a single Markdown file with YAML front matter
-(`id`, `title`, `summary` required). Each top-level `# Heading` becomes
-one step. A step may begin with a fenced ```` ```tutorial-step ```` YAML
+(`id`, `title`, `summary` required; optional `workspace: fresh|cwd`,
+where `cwd` runs the steps in the directory the reader launched from and
+scopes run selection, `list`, and `progress` to that directory). Each
+top-level `# Heading` becomes one step. A step may begin with a fenced
+```` ```tutorial-step ```` YAML
 block; recognised fields are `required_patterns`, `pre_command`,
 `check_command`, `post_command`, `hint`, `edit_file`, `kind`, `options`,
 `answers`. `pre_command` / `check_command` / `post_command` only execute
