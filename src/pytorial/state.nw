@@ -104,11 +104,13 @@ The store separates two concerns:
 \begin{description}
 \item[Run records] JSON files under [[runs/]], one file per tutorial ID.
 \item[Workspaces] persistent directories under [[workspaces/]], one
-  directory per run.
+  directory per run---unless the tutorial asked to run in place, in which
+  case the run only records the directory the student launched it from
+  and the store allocates nothing.
 \end{description}
 
-This split keeps the bookkeeping files small while still giving each run
-its own durable shell workspace.
+This split keeps the bookkeeping files small while still giving each
+sandboxed run its own durable shell workspace.
 
 <<classes>>=
 class StateStore:
@@ -309,6 +311,41 @@ def test_workspace_path_is_nested_by_tutorial_and_run(tmp_path):
 @
 
 
+\subsection{Comparing workspaces}
+
+Once a run can name a directory the student chose, two questions become
+string comparisons: does an unfinished run belong to \emph{this}
+directory, and did we already record one here?  Comparing paths as
+strings is only sound if the same directory always yields the same
+string.  [[os.getcwd()]] already returns an absolute, symlink-free path,
+so the comparison would usually work with no normalisation at all---but
+\enquote{usually} is the wrong guarantee for the rule that decides
+whether a student's saved progress is found.  A run recorded through a
+symbolic link must still match the same directory reached by [[cd]].
+Resolving both sides through one function, on the way in and on the way
+out, makes the comparison total instead of best-effort.  [[resolve()]]
+is non-strict, so a directory that has since been deleted still yields a
+comparable string rather than an error.
+
+<<functions>>=
+def normalise_workspace(workspace: str | Path) -> str:
+    """Return a stable, comparable path string for one workspace."""
+
+    return str(Path(workspace).resolve())
+@
+
+<<test functions>>=
+def test_normalise_workspace_resolves_symlinks(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    assert normalise_workspace(link) == normalise_workspace(real)
+    assert normalise_workspace(str(link)) == str(real.resolve())
+@
+
+
 \subsection{Loading stored runs}
 
 Missing state should behave like first use, not like an error.  The
@@ -380,14 +417,63 @@ def test_save_runs_writes_json_file(tmp_path):
 Resume and review both care about the most recent run first, so we make
 that the default query.
 
+An in-place tutorial makes \enquote{the most recent run} incomplete: a
+run recorded while scaffolding a release in one checkout says nothing
+about a second checkout.  The optional filter lets the caller ask the
+narrower question---the most recent run \emph{recorded in this
+directory}---while the unfiltered call keeps its old meaning for
+tutorials that never cared where the student stood.  We filter here
+rather than in the runner so that the whole-history scan and the
+normalisation rule stay in the layer that owns the records.
+
 <<state store methods>>=
-def latest_run(self, tutorial_id: str) -> TutorialRun | None:
-    """Return the most recent recorded run for ``tutorial_id``."""
+def latest_run(
+    self,
+    tutorial_id: str,
+    *,
+    workspace: str | Path | None = None,
+) -> TutorialRun | None:
+    """Return the most recent recorded run for ``tutorial_id``.
+
+    With ``workspace``, only runs recorded in that directory count.
+    """
 
     runs = self.load_runs(tutorial_id)
+    if workspace is not None:
+        wanted = normalise_workspace(workspace)
+        runs = [
+            run for run in runs if normalise_workspace(run.workspace) == wanted
+        ]
     if not runs:
         return None
     return runs[-1]
+@
+
+<<test functions>>=
+def test_latest_run_ignores_runs_from_other_workspaces(tmp_path):
+    store = StateStore(tmp_path)
+    first = TutorialRun(
+        tutorial_id="release",
+        run_id="run-1",
+        workspace=str(tmp_path / "a"),
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    second = TutorialRun(
+        tutorial_id="release",
+        run_id="run-2",
+        workspace=str(tmp_path / "b"),
+        started_at="2026-01-01T00:01:00+00:00",
+        updated_at="2026-01-01T00:01:00+00:00",
+    )
+
+    store.save_runs("release", [first, second])
+
+    in_a = store.latest_run("release", workspace=tmp_path / "a")
+
+    assert in_a.run_id == "run-1"
+    assert store.latest_run("release", workspace=tmp_path / "c") is None
+    assert store.latest_run("release").run_id == "run-2"
 @
 
 <<test functions>>=
@@ -416,27 +502,58 @@ def test_latest_run_returns_last_saved_run(tmp_path):
 
 \subsection{Starting a new run}
 
-Starting a run allocates a fresh workspace immediately.  That matters for
-the CLI because the user should know exactly where the step shell will be
+Starting a run fixes its workspace immediately.  That matters for the
+CLI because the user should know exactly where the step shell will be
 started before the shell opens.
+
+Two kinds of tutorial want different answers to \enquote{where?}, but
+only one of those answers is the store's business.  When nobody names a
+directory the store allocates and creates a sandbox, because that is a
+storage decision it already owns.  Which directory an in-place run uses
+depends on where the user stood when they typed the command, which is a
+fact about the invocation, not about storage---so the caller passes it
+in.  Keeping [[Path.cwd()]] out of the store means no store method
+depends on ambient process state, which is what lets the tests name a
+directory outright instead of changing directory, and what leaves room
+for a host that wants to name some other project root.
+
+The [[mkdir]] stays on both paths.  For an in-place run it is a no-op,
+since the directory the user stands in exists; keeping it unconditional
+means an explicitly named directory that does not exist yet behaves like
+a sandbox instead of failing later, inside a shell.  Recording every
+workspace through [[normalise_workspace]] gives the saved JSON one
+invariant---absolute and symlink-free---which the lookup above relies
+on.  Sandboxes used to be recorded as constructed, so a state root behind
+a symbolic link now records the resolved spelling; nothing compares
+sandbox paths, so the difference is invisible in practice.
 
 We also copy the tutorial title and source metadata into the run record.
 That way review still has something human-readable to show even if the
 original Markdown file disappears later.
 
 <<state store methods>>=
-def start_run(self, tutorial: Tutorial) -> TutorialRun:
-    """Create and persist a fresh run for ``tutorial``."""
+def start_run(
+    self,
+    tutorial: Tutorial,
+    *,
+    workspace: str | Path | None = None,
+) -> TutorialRun:
+    """Create and persist a fresh run for ``tutorial``.
+
+    Without ``workspace``, the run gets a sandbox directory of its own.
+    """
 
     created_at = utc_now()
     run_id = build_run_id()
-    workspace = self.workspace_path(tutorial.id, run_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    if workspace is None:
+        workspace = self.workspace_path(tutorial.id, run_id)
+    workspace_dir = Path(workspace)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     run = TutorialRun(
         tutorial_id=tutorial.id,
         tutorial_title=tutorial.title,
         run_id=run_id,
-        workspace=str(workspace),
+        workspace=normalise_workspace(workspace_dir),
         started_at=created_at,
         updated_at=created_at,
         tutorial_source_path=tutorial.source_path,
@@ -466,6 +583,43 @@ def test_start_run_creates_workspace_and_persists_run(tmp_path):
     assert Path(run.workspace).is_dir()
     assert store.latest_run("shell-basics").run_id == run.run_id
     assert store.latest_run("shell-basics").tutorial_title == "Shell Basics"
+
+
+def test_start_run_records_a_caller_supplied_workspace(tmp_path):
+    store = StateStore(tmp_path / "state")
+    tutorial = Tutorial(
+        id="release",
+        title="Release",
+        summary="Scaffold a release.",
+        steps=(TutorialStep(title="Tag it", instructions="Run git tag."),),
+        workspace="cwd",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+
+    run = store.start_run(tutorial, workspace=project)
+
+    assert run.workspace == str(project.resolve())
+    assert list(store.workspaces_dir.iterdir()) == []
+
+
+def test_latest_run_matches_a_workspace_through_a_symlink(tmp_path):
+    store = StateStore(tmp_path / "state")
+    tutorial = Tutorial(
+        id="release",
+        title="Release",
+        summary="Scaffold a release.",
+        steps=(TutorialStep(title="Tag it", instructions="Run git tag."),),
+        workspace="cwd",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(project)
+
+    run = store.start_run(tutorial, workspace=link)
+
+    assert store.latest_run("release", workspace=project).run_id == run.run_id
 @
 
 

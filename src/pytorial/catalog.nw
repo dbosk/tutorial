@@ -64,6 +64,8 @@ from pathlib import Path
 from pytorial.model import TextMatch
 from pytorial.model import Tutorial
 from pytorial.model import TutorialStep
+from pytorial.model import WORKSPACE_FRESH
+from pytorial.model import WORKSPACE_MODES
 @
 
 
@@ -403,7 +405,9 @@ def parse_tutorial_text(
 
     front_matter, body = split_yaml_front_matter(text)
     metadata = front_matter_mapping(front_matter)
-    reject_unknown_keys(metadata, {"id", "title", "summary"}, "Tutorial")
+    reject_unknown_keys(
+        metadata, {"id", "title", "summary", "workspace"}, "Tutorial"
+    )
 
     steps = tuple(
         build_tutorial_step(title, section_body)
@@ -414,6 +418,7 @@ def parse_tutorial_text(
         title=require_string(metadata, "title", "Tutorial"),
         summary=require_string(metadata, "summary", "Tutorial"),
         steps=steps,
+        workspace=tutorial_workspace(metadata),
         source_path=None if source_path is None else str(source_path),
         source_digest=build_source_digest(text),
     )
@@ -438,6 +443,92 @@ def test_parse_tutorial_text_builds_tutorial_without_source_path():
     assert tutorial.steps[0].title == "Step one"
     assert tutorial.source_path is None
     assert tutorial.source_digest
+@
+
+\subsection{Validating where the tutorial runs}
+
+Front matter is the one place an author can make a tutorial write into a
+real project, so a typo here must fail loudly rather than silently fall
+back to the safe default.  We therefore reject any value we do not
+recognise instead of treating \enquote{not [[cwd]]} as [[fresh]]: a
+tutorial that meant [[cwd]] but wrote [[cdw]] would otherwise run in a
+sandbox and quietly do nothing useful, with no error for the author to
+read.  Reusing [[optional_string]] keeps the missing-versus-wrong-type
+distinction identical to every other optional field: absent means the
+default, present but not a non-empty string is an error.
+
+<<functions>>=
+def tutorial_workspace(metadata: dict) -> str:
+    """Return the validated workspace mode from tutorial front matter."""
+
+    workspace = optional_string(metadata.get("workspace"), "Tutorial workspace")
+    if workspace is None:
+        return WORKSPACE_FRESH
+    if workspace not in WORKSPACE_MODES:
+        names = ", ".join(repr(mode) for mode in WORKSPACE_MODES)
+        raise ValueError(f"Tutorial workspace must be one of: {names}.")
+    return workspace
+@
+
+The tests spell the modes out as literals rather than through the
+constants, because the YAML spelling is the contract an author relies on.
+
+<<test functions>>=
+def test_parse_tutorial_text_defaults_to_a_fresh_workspace():
+    tutorial = parse_tutorial_text(
+        "---\n"
+        "id: demo\n"
+        "title: Demo\n"
+        "summary: A short tutorial.\n"
+        "---\n\n"
+        "# Step one\n\n"
+        "Do the first thing.\n"
+    )
+
+    assert tutorial.workspace == "fresh"
+
+
+def test_parse_tutorial_text_accepts_an_in_place_workspace():
+    tutorial = parse_tutorial_text(
+        "---\n"
+        "id: release\n"
+        "title: Release\n"
+        "summary: Scaffold a release.\n"
+        "workspace: cwd\n"
+        "---\n\n"
+        "# Tag it\n\n"
+        "Run `git tag`.\n"
+    )
+
+    assert tutorial.workspace == "cwd"
+
+
+def test_parse_tutorial_text_rejects_an_unknown_workspace():
+    with pytest.raises(ValueError, match="workspace must be one of"):
+        parse_tutorial_text(
+            "---\n"
+            "id: release\n"
+            "title: Release\n"
+            "summary: Scaffold a release.\n"
+            "workspace: sandbox\n"
+            "---\n\n"
+            "# Tag it\n\n"
+            "Run `git tag`.\n"
+        )
+
+
+def test_parse_tutorial_text_rejects_a_non_string_workspace():
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        parse_tutorial_text(
+            "---\n"
+            "id: release\n"
+            "title: Release\n"
+            "summary: Scaffold a release.\n"
+            "workspace: 3\n"
+            "---\n\n"
+            "# Tag it\n\n"
+            "Run `git tag`.\n"
+        )
 @
 
 

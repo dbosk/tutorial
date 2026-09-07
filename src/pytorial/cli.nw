@@ -52,6 +52,7 @@ from pytorial.cli import *
 from pytorial.model import StepTranscript
 from pytorial.model import TextMatch
 from pytorial.model import Tutorial
+from pytorial.model import TutorialRun
 from pytorial.model import TutorialStep
 from pytorial.shell import EditorResult
 from pytorial.shell import run_scripted_shell
@@ -102,6 +103,38 @@ def write_hook_tutorial(root_dir: str | Path) -> Path:
         "  - prepared\n"
         "```\n\n"
         "Print `$READY`.\n"
+    )
+    return tutorial_path
+@
+
+The in-place command tests need a tutorial whose front matter asks for
+the reader's directory.  Two shell steps let a test prove the notice is
+printed once per invocation rather than once per step.
+
+<<test functions>>=
+def write_in_place_tutorial(root_dir: str | Path) -> Path:
+    """Write a two-step tutorial that runs in the caller's directory."""
+
+    tutorial_path = Path(root_dir) / "release.md"
+    tutorial_path.write_text(
+        "---\n"
+        "id: release\n"
+        "title: Release\n"
+        "summary: Scaffold a release in the project you are standing in.\n"
+        "workspace: cwd\n"
+        "---\n\n"
+        "# Check the tree\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - pwd\n"
+        "```\n\n"
+        "Run `pwd`.\n\n"
+        "# Tag the release\n\n"
+        "```tutorial-step\n"
+        "required_patterns:\n"
+        "  - echo tagged\n"
+        "```\n\n"
+        "Run `echo tagged`.\n"
     )
     return tutorial_path
 @
@@ -297,6 +330,7 @@ from pytorial.catalog import serialize_tutorial_step
 from pytorial.catalog import universal_tutorial_path
 import typer
 
+from pytorial.model import runs_in_place
 from pytorial.model import step_kind
 from pytorial.model import TutorialStep
 from pytorial.run import perform_step
@@ -1650,6 +1684,145 @@ def render_step_for_run(
         prompt_to_start_editor(console, prompt_for_editor_start)
 @
 
+\subsection{Announcing an in-place run}
+
+An in-place tutorial is the one case where the reader's own files are
+the workspace, so the CLI owes them a sentence before the first step
+opens a shell there.  One line is the whole contract: no confirmation
+prompt, because the reader typed the tutorial's name in this directory
+on purpose, and a prompt that is always answered \enquote{yes} teaches
+people to stop reading it.
+
+Where that sentence can come from is forced by the runner's design.  The
+directory is chosen inside [[select_run]], so nothing before
+[[TutorialRunner.run]] knows it without re-deriving the policy the
+runner already owns; and [[render_step_prompt]] runs once per step and
+keeps no memory, so it cannot say \enquote{first}.  The step callback is
+the only place that sees the chosen run \emph{and} can remember whether
+it has spoken.  Building that callback in a factory gives the flag
+somewhere to live and collapses two identical closures---Typer's and
+argparse's---into one, which is where per-invocation policy belongs: the
+two front ends are supposed to differ only in their prompting surface.
+
+Because the retry loop calls the runner again after a failed step with
+the same callback, \enquote{once} means once per command invocation
+rather than once per [[run]] call---which is what a reader expects,
+since they never left the directory in between.  The notice is printed
+the same way [[render_step_prompt]] prints its workspace line, so the
+two mentions of the directory look alike.
+
+<<constants>>=
+IN_PLACE_RUN_NOTICE = "This tutorial runs in your current directory:"
+<<functions>>=
+def render_in_place_notice(console: Console, tutorial, run) -> None:
+    """Announce that ``tutorial`` runs in the reader's own directory."""
+
+    if not runs_in_place(tutorial):
+        return
+    console.print(f"{IN_PLACE_RUN_NOTICE} {run.workspace}", style="bold")
+@
+
+<<functions>>=
+def make_run_step_renderer(
+    *,
+    console: Console,
+    prompt_for_editor_start: Callable[[str], str],
+) -> Callable[..., None]:
+    """Return the ``before_step`` callback for one run invocation."""
+
+    announced = False
+
+    def before_step(tutorial, step_index, step, run) -> None:
+        nonlocal announced
+        if not announced:
+            announced = True
+            render_in_place_notice(console, tutorial, run)
+        render_step_for_run(
+            console=console,
+            tutorial=tutorial,
+            step_index=step_index,
+            step=step,
+            run=run,
+            prompt_for_editor_start=prompt_for_editor_start,
+        )
+
+    return before_step
+@
+
+Let's verify that the callback speaks once per invocation for an in-place
+tutorial and never for a sandboxed one.  Driving the callback directly
+keeps these tests about the flag; the command tests later cover the
+wiring of each front end.
+
+<<test functions>>=
+def make_notice_fixture(workspace):
+    """Return a two-step tutorial in ``workspace`` mode and one of its runs."""
+
+    tutorial = Tutorial(
+        id="release",
+        title="Release",
+        summary="Scaffold a release.",
+        steps=(
+            TutorialStep(title="Check the tree", instructions="Run `pwd`."),
+            TutorialStep(
+                title="Tag the release", instructions="Run `git tag`."
+            ),
+        ),
+        workspace=workspace,
+    )
+    run = TutorialRun(
+        tutorial_id="release",
+        run_id="run-1",
+        workspace="/tmp/project",
+        started_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    return tutorial, run
+
+
+def test_make_run_step_renderer_announces_in_place_runs_once():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=200,
+        force_terminal=False,
+        color_system=None,
+    )
+    tutorial, run = make_notice_fixture("cwd")
+    before_step = make_run_step_renderer(
+        console=console,
+        prompt_for_editor_start=lambda prompt: "",
+    )
+
+    before_step(tutorial, 0, tutorial.steps[0], run)
+    before_step(tutorial, 1, tutorial.steps[1], run)
+    output = buffer.getvalue()
+
+    assert output.count(IN_PLACE_RUN_NOTICE) == 1
+    assert f"{IN_PLACE_RUN_NOTICE} /tmp/project" in output
+    assert output.index(IN_PLACE_RUN_NOTICE) < output.index("Step 1/2")
+
+
+def test_make_run_step_renderer_stays_quiet_for_sandboxed_runs():
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=200,
+        force_terminal=False,
+        color_system=None,
+    )
+    tutorial, run = make_notice_fixture("fresh")
+    before_step = make_run_step_renderer(
+        console=console,
+        prompt_for_editor_start=lambda prompt: "",
+    )
+
+    before_step(tutorial, 0, tutorial.steps[0], run)
+
+    assert IN_PLACE_RUN_NOTICE not in buffer.getvalue()
+    assert "Step 1/2" in buffer.getvalue()
+@
+
 <<test functions>>=
 def test_normalise_question_answer_accepts_single_select_numbers():
     step = TutorialStep(
@@ -2647,15 +2820,10 @@ def run_command(
     def prompt_for_editor_start(prompt: str) -> str:
         return typer.prompt(prompt, default="", show_default=False)
 
-    def before_step(tutorial, step_index, step, run) -> None:
-        render_step_for_run(
-            console=console,
-            tutorial=tutorial,
-            step_index=step_index,
-            step=step,
-            run=run,
-            prompt_for_editor_start=prompt_for_editor_start,
-        )
+    before_step = make_run_step_renderer(
+        console=console,
+        prompt_for_editor_start=prompt_for_editor_start,
+    )
 
     command_question_runner = make_question_step_runner(
         console=console,
@@ -3005,6 +3173,66 @@ def test_run_command_can_retry_a_failed_step(tmp_path):
     assert "Answer with an option number or the full option text." in result.stdout
     assert "Answer with option numbers or texts separated by commas." in result.stdout
     assert "Completed shell-basics" in result.stdout
+
+
+def test_run_command_announces_the_current_directory_once(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    commands = iter(["pwd\n", "echo tagged\n"])
+
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
+
+    result = CliRunner().invoke(
+        create_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+        ),
+        ["run", "--tutorial-path", str(tutorial_path), "release"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.count(IN_PLACE_RUN_NOTICE) == 1
+    assert project.name in result.stdout
+    assert "Completed release" in result.stdout
+
+
+def test_run_command_stays_quiet_for_sandboxed_tutorials(tmp_path):
+    tutorial_path = write_hook_tutorial(tmp_path)
+
+    def scripted_runner(*, workspace, prompt_name="pytorial", pre_command=None):
+        return run_scripted_shell(
+            "printf '%s\\n' \"$READY\"\n",
+            workspace=workspace,
+            prompt_name=prompt_name,
+            pre_command=pre_command,
+        )
+
+    result = CliRunner().invoke(
+        create_app(
+            state_root=tmp_path / "state",
+            shell_runner=scripted_runner,
+        ),
+        [
+            "run",
+            "--tutorial-path",
+            str(tutorial_path),
+            "--allow-shell",
+            "hooks",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert IN_PLACE_RUN_NOTICE not in result.stdout
+    assert "Completed hooks" in result.stdout
 
 
 def test_standalone_run_denies_shell_hooks_by_default(tmp_path):
@@ -3727,15 +3955,10 @@ def argparse_run_command(
             require_paths=True,
         )
 
-        def before_step(tutorial, step_index, step, run) -> None:
-            render_step_for_run(
-                console=console,
-                tutorial=tutorial,
-                step_index=step_index,
-                step=step,
-                run=run,
-                prompt_for_editor_start=prompt_for_input,
-            )
+        before_step = make_run_step_renderer(
+            console=console,
+            prompt_for_editor_start=prompt_for_input,
+        )
 
         result = run_tutorial_with_menu(
             tutorial_runner,
@@ -3757,6 +3980,47 @@ def argparse_run_command(
     except typer.Exit as error:
         return error.exit_code
     return 0
+@
+
+The argparse front end builds its step callback through the same factory
+as Typer, so the notice must reach an embedded host's output as well.
+
+<<test functions>>=
+def test_argparse_run_command_announces_the_current_directory(
+    tmp_path, monkeypatch, capsys
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    commands = iter(["pwd\n", "echo tagged\n"])
+
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
+
+    exit_code = argparse_run_command(
+        argparse.Namespace(
+            tutorial_id="release",
+            tutorial_path=[str(tutorial_path)],
+            restart=False,
+            allow_shell=False,
+        ),
+        namespace="pytorial",
+        state_root=tmp_path / "state",
+        tutorial_paths=(),
+        shell_runner=scripted_runner,
+        editor_runner=run_editor,
+        question_runner=None,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.count(IN_PLACE_RUN_NOTICE) == 1
+    assert project.name in captured.out
 @
 
 <<test functions>>=
@@ -4142,7 +4406,14 @@ def develop_command(
 
     \b
     YAML front matter (top of the Markdown file): id, title, summary
-    (all required).
+    (all required); workspace: fresh (default) or cwd. A cwd tutorial
+    runs its steps in the directory the reader launched it from, and
+    its saved progress is scoped to that directory.
+
+    \b
+    develop always uses a temporary workspace, even for a cwd tutorial.
+    Test an in-place tutorial with `tutorial run --restart` inside a
+    scratch copy of a real project.
 
     \b
     YAML tip: use `|` for multi-line shell hooks; `>` would fold newlines.
