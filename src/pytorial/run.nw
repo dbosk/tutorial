@@ -70,6 +70,7 @@ from pytorial.model import TextMatch
 from pytorial.model import Tutorial
 from pytorial.model import TutorialRun
 from pytorial.model import TutorialStep
+from pytorial.model import runs_in_place
 from pytorial.model import step_kind
 from pytorial.shell import EditorResult
 from pytorial.shell import run_editor
@@ -368,6 +369,120 @@ Display the file with `cat notes.txt`.
 The transcript should show both the command and the file contents.
 @
 
+The in-place tests need a second tutorial, because the aspect they vary
+is a front-matter key and the sandboxed sample must stay sandboxed for
+every other test.  Two shell steps are enough: the first lets a test read
+the directory back out of the transcript, and two steps let a run be
+unfinished.  Several tests also need a run that is already complete in
+some directory, and writing the transcripts directly is both faster and
+more explicit than driving a scripted shell through every step.
+
+<<test functions>>=
+def write_in_place_tutorial(root_dir: str | Path) -> Path:
+    """Write a two-step tutorial that runs in the caller's directory."""
+
+    tutorial_path = Path(root_dir) / "release.md"
+    tutorial_path.write_text(
+        """\
+---
+id: release
+title: Release
+summary: Scaffold a release in the project you are standing in.
+workspace: cwd
+---
+
+# Check the tree
+
+```tutorial-step
+required_patterns:
+  - pwd
+```
+
+Run `pwd`.
+
+# Tag the release
+
+```tutorial-step
+required_patterns:
+  - echo tagged
+```
+
+Run `echo tagged`.
+"""
+    )
+    return tutorial_path
+
+
+def finish_in_place_run(store, tutorial, project):
+    """Record a completed run of ``tutorial`` in ``project``."""
+
+    run = store.start_run(tutorial, workspace=project)
+    for step_index, step in enumerate(tutorial.steps):
+        run.transcripts.append(
+            StepTranscript(
+                tutorial_id=tutorial.id,
+                step_index=step_index,
+                title=step.title,
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:00:01+00:00",
+                exit_status=0,
+                transcript=step.title,
+                passed=True,
+            )
+        )
+    store.store_run(run)
+    return run
+@
+
+
+\section{Choosing the directory a run uses}
+
+The runner is where the tutorial's declared workspace mode becomes a
+real path, because it is the only layer that knows both the tutorial and
+the invocation.  The store deliberately never reads the working directory
+(\cref{tutorial-state}), and the model only knows the spelling of the
+mode.
+
+Returning [[None]] for an ordinary tutorial is deliberate rather than a
+placeholder: [[None]] is precisely what the store already reads as
+\enquote{allocate a sandbox} when starting a run and as \enquote{do not
+filter} when looking one up, so one value carries the default policy
+through both calls without a second branch at either call site.
+
+We read the working directory here, once per decision, rather than
+capturing it when the runner is constructed.  A host that constructs a
+runner early and runs a tutorial later should still act on where the
+user is now.
+
+<<functions>>=
+def workspace_for_run(tutorial: Tutorial) -> Path | None:
+    """Return the directory a run of ``tutorial`` must use, if it is fixed."""
+
+    if runs_in_place(tutorial):
+        return Path.cwd()
+    return None
+@
+
+<<test functions>>=
+def test_workspace_for_run_defers_to_the_store_for_fresh_tutorials(tmp_path):
+    tutorial_path = write_demo_tutorial(tmp_path)
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("shell-basics")
+
+    assert workspace_for_run(tutorial) is None
+
+
+def test_workspace_for_run_uses_the_current_directory_in_place(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    assert workspace_for_run(tutorial) == project.resolve()
+@
+
 
 \section{The tutorial runner}
 
@@ -450,6 +565,27 @@ def test_runner_keeps_store_and_backends(tmp_path):
 @
 
 
+\subsection{Finding the run that counts}
+
+Three operations ask the same question---resume, [[list]], and
+[[progress]] all want \enquote{the run this invocation is about}---and
+for an in-place tutorial that question is scoped by directory.  Giving
+it one method means the three cannot drift apart.  It also marks the one
+deliberate exception: [[review]] and [[get_run]] keep asking the
+unscoped question, because review browses history rather than continuing
+work, and a reader who wants a specific run already has [[--run-id]].
+
+<<tutorial runner methods>>=
+def current_run(self, tutorial: Tutorial) -> TutorialRun | None:
+    """Return the latest run of ``tutorial`` in the workspace it uses."""
+
+    return self.store.latest_run(
+        tutorial.id,
+        workspace=workspace_for_run(tutorial),
+    )
+@
+
+
 \subsection{Listing tutorials with progress}
 
 The list command needs the loaded tutorial definitions alongside the
@@ -461,7 +597,7 @@ def list_tutorials(self) -> tuple[tuple[Tutorial, ProgressState], ...]:
 
     entries = []
     for tutorial in self.catalog.get_tutorials():
-        run = self.store.latest_run(tutorial.id)
+        run = self.current_run(tutorial)
         entries.append((tutorial, self.store.progress_for(tutorial, run)))
     return tuple(entries)
 @
@@ -478,6 +614,29 @@ def test_list_tutorials_returns_progress_entries(tmp_path):
 
     assert tutorial.id == "shell-basics"
     assert progress.completed_steps == 0
+
+
+def test_list_tutorials_scopes_in_place_progress_by_directory(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    project_b = tmp_path / "b"
+    project_b.mkdir()
+    finish_in_place_run(store, tutorial, project_a)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+
+    monkeypatch.chdir(project_a)
+    _, progress_a = runner.list_tutorials()[0]
+    monkeypatch.chdir(project_b)
+    _, progress_b = runner.list_tutorials()[0]
+
+    assert progress_a.completed_steps == 2
+    assert progress_b.completed_steps == 0
+    assert progress_b.run_id is None
 @
 
 
@@ -491,7 +650,7 @@ def progress(self, tutorial_id: str) -> ProgressState:
     """Return the saved progress for ``tutorial_id``."""
 
     tutorial = self.catalog.get_tutorial(tutorial_id)
-    run = self.store.latest_run(tutorial_id)
+    run = self.current_run(tutorial)
     return self.store.progress_for(tutorial, run)
 @
 
@@ -507,6 +666,29 @@ def test_progress_reports_zero_for_fresh_tutorial(tmp_path):
 
     assert progress.total_steps == 7
     assert progress.completed_steps == 0
+
+
+def test_progress_reports_the_run_in_the_current_directory(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    project_b = tmp_path / "b"
+    project_b.mkdir()
+    finished = finish_in_place_run(store, tutorial, project_a)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+
+    monkeypatch.chdir(project_a)
+    progress_a = runner.progress("release")
+    monkeypatch.chdir(project_b)
+    progress_b = runner.progress("release")
+
+    assert progress_a.run_id == finished.run_id
+    assert progress_a.finished is True
+    assert progress_b.finished is False
 @
 
 
@@ -962,10 +1144,60 @@ Print `$READY`.
 @
 
 
+An in-place run must land in the directory the test chose, and the proof
+should come from the shell itself: the transcript of [[pwd]] names the
+directory the shell actually started in, which is stronger than trusting
+the recorded path.  The empty [[workspaces/]] directory proves the store
+allocated nothing on the way.
+
+<<test functions>>=
+def test_run_uses_the_current_directory_for_in_place_tutorials(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    commands = iter(["pwd\n", "echo tagged\n"])
+
+    def scripted_runner(*, workspace, prompt_name="pytorial"):
+        return run_scripted_shell(
+            next(commands),
+            workspace=workspace,
+            prompt_name=prompt_name,
+        )
+
+    runner = TutorialRunner(
+        store,
+        TutorialCatalog((tutorial_path,)),
+        shell_runner=scripted_runner,
+    )
+
+    result = runner.run("release")
+
+    assert result.progress.finished is True
+    assert Path(result.run.workspace) == project.resolve()
+    assert str(project.resolve()) in result.run.transcripts[0].transcript
+    assert list(store.workspaces_dir.iterdir()) == []
+@
+
+
 \subsection{Selecting which run to use}
 
 Separating this policy into its own method keeps the main run loop about
 step execution rather than resume bookkeeping.
+
+For an in-place tutorial, \enquote{is there an unfinished run?} is not a
+well-formed question on its own: a run only speaks for the directory it
+was recorded in.  Someone scaffolding a release in two checkouts must get
+two independent runs, and finishing the workflow in one project must not
+report the other as already complete.  Scoping the lookup also removes a
+trap that would otherwise bite the first author who converts a tutorial:
+the digest guard refuses to resume a run whose tutorial file changed, and
+adding [[workspace: cwd]] changes that file---but the old run lives in a
+sandbox, so it is never a resume candidate, and the converted tutorial
+starts cleanly where the author stands.
 
 <<tutorial runner methods>>=
 def select_run(
@@ -976,13 +1208,14 @@ def select_run(
 ) -> tuple[TutorialRun, bool, bool]:
     """Return ``(run, restarted, already_finished)`` for ``tutorial``."""
 
-    latest = self.store.latest_run(tutorial.id)
+    workspace = workspace_for_run(tutorial)
+    latest = self.current_run(tutorial)
     if latest is None:
-        return self.store.start_run(tutorial), False, False
+        return self.store.start_run(tutorial, workspace=workspace), False, False
 
     progress = self.store.progress_for(tutorial, latest)
     if restart:
-        return self.store.start_run(tutorial), True, False
+        return self.store.start_run(tutorial, workspace=workspace), True, False
 
     ensure_run_matches_tutorial(tutorial, latest)
 
@@ -1024,6 +1257,95 @@ def test_select_run_rejects_resume_after_tutorial_change(tmp_path):
 
     with pytest.raises(RuntimeError, match="changed since this run began"):
         TutorialRunner(store, TutorialCatalog((tutorial_path,))).select_run(changed)
+@
+
+The four in-place cases follow the same shape: record a run in one
+directory, then ask from the same or another directory.
+
+<<test functions>>=
+def test_select_run_resumes_an_unfinished_run_in_the_same_directory(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project = tmp_path / "project"
+    project.mkdir()
+    run = store.start_run(tutorial, workspace=project)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+    monkeypatch.chdir(project)
+
+    selected, restarted, already_finished = runner.select_run(tutorial)
+
+    assert selected.run_id == run.run_id
+    assert restarted is False
+    assert already_finished is False
+
+
+def test_select_run_starts_a_new_run_in_another_directory(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    project_b = tmp_path / "b"
+    project_b.mkdir()
+    run = store.start_run(tutorial, workspace=project_a)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+    monkeypatch.chdir(project_b)
+
+    selected, restarted, already_finished = runner.select_run(tutorial)
+
+    assert selected.run_id != run.run_id
+    assert selected.workspace == str(project_b.resolve())
+    assert restarted is False
+    assert already_finished is False
+
+
+def test_select_run_reports_already_finished_only_in_that_directory(
+    tmp_path, monkeypatch
+):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    project_b = tmp_path / "b"
+    project_b.mkdir()
+    finished = finish_in_place_run(store, tutorial, project_a)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+
+    monkeypatch.chdir(project_a)
+    selected_a, _, finished_a = runner.select_run(tutorial)
+    monkeypatch.chdir(project_b)
+    selected_b, _, finished_b = runner.select_run(tutorial)
+
+    assert selected_a.run_id == finished.run_id
+    assert finished_a is True
+    assert selected_b.run_id != finished.run_id
+    assert finished_b is False
+
+
+def test_select_run_restarts_in_the_same_directory(tmp_path, monkeypatch):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project = tmp_path / "project"
+    project.mkdir()
+    finished = finish_in_place_run(store, tutorial, project)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+    monkeypatch.chdir(project)
+
+    selected, restarted, already_finished = runner.select_run(
+        tutorial, restart=True
+    )
+
+    assert restarted is True
+    assert already_finished is False
+    assert selected.run_id != finished.run_id
+    assert selected.workspace == finished.workspace
 @
 
 
@@ -1104,6 +1426,31 @@ def test_review_returns_latest_attempt_for_each_step(tmp_path):
     assert reviewed_run.run_id == run.run_id
     assert len(transcripts) == 1
     assert transcripts[0].passed is True
+@
+
+
+Review deliberately ignores the current directory.  This test pins that
+asymmetry so a later refactor cannot route review through
+[[current_run]] without noticing.
+
+<<test functions>>=
+def test_review_ignores_the_current_directory(tmp_path, monkeypatch):
+    tutorial_path = write_in_place_tutorial(tmp_path)
+    store = StateStore(tmp_path / "state")
+    tutorial = TutorialCatalog((tutorial_path,)).get_tutorial("release")
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    project_b = tmp_path / "b"
+    project_b.mkdir()
+    finish_in_place_run(store, tutorial, project_a)
+    latest = finish_in_place_run(store, tutorial, project_b)
+    runner = TutorialRunner(store, TutorialCatalog((tutorial_path,)))
+    monkeypatch.chdir(project_a)
+
+    _, run, transcripts = runner.review("release")
+
+    assert run.run_id == latest.run_id
+    assert len(transcripts) == 2
 @
 
 
